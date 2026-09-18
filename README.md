@@ -10,15 +10,41 @@ results are *reliable* — and a script that audits the benchmark against docume
 
 ## Quick start
 
+The boards are attached to the machine you run this on — everything is local.
+
 ```bash
-./sync.sh                                             # push to the Pi that holds the boards
-ssh raspberrypi 'cd ~/dev/ConnectionLibBenchmark && ~/.venvs/pio/bin/pio run -t upload -e bench_node'
+pio run -t upload -e bench_node                       # flash, once per campaign
+pio run -t upload -e bench_gateway
+./tools/selftest.py                                   # prove the hardware path first
 ./run_benchmark.py --tech espnow --quick              # one technology, a few minutes
 ./run_campaign.py --preset full                       # the 10h campaign
 ./progress.py --watch                                 # live view of a running campaign
 ./verify_practices.py --results results/<campaign>    # the audit
 ./plot_results.py  --results results/<campaign>       # figures
 ```
+
+Requires PlatformIO, `pyserial`, `matplotlib` and `ppk2-api` (the last only for energy
+measurement). A venv containing all of them is the easiest route; symlink its `pio` onto your
+`PATH`.
+
+### Waking the bench remotely
+
+The bench host is normally off. A Raspberry Pi on the same network acts as an always-on jump host
+and power switch, so the working chain from outside is:
+
+```
+VPN → raspberrypi → start_desktop → ssh desktop → work
+```
+
+`start_desktop`, `stop_desktop` and `desktop_status` live in `~/.local/bin` on the Pi.
+`stop_desktop` refuses to power the machine off while a campaign is running — a full campaign is
+ten hours of bench time and is not reproducible on a whim.
+
+> **Historical note.** The boards used to live on the Pi itself, driven over SSH with a `sync.sh`
+> that pushed this repo to it. That is gone: the boards are now on the bench host directly, which
+> removes a whole class of problems (a `--delete` sync that could destroy a results tree, the Pi's
+> USB power budget, and serial latency over two hops). None of the benchmark code changed in the
+> move — it always ran locally against local serial ports.
 
 ## Why one firmware for everything
 

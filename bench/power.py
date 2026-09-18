@@ -22,6 +22,7 @@ Everything here is optional. If the package is missing or no PPK2 is attached, `
 returns None and the campaign runs exactly as before, without energy columns.
 """
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -82,15 +83,9 @@ class PowerMonitor:
 
         try:
             if port is None:
-                devices = PPK2_API.list_devices()
-                # Newer versions return (port, serial) pairs; older ones return bare port strings.
-                ports = [d[0] if isinstance(d, (tuple, list)) else d for d in devices]
-                if not ports:
-                    log("power: no PPK2 found — continuing without energy measurement")
+                port = cls._find_port(log)
+                if port is None:
                     return None
-                if len(ports) > 1:
-                    log(f"power: several PPK2s found ({ports}); using {ports[0]}")
-                port = ports[0]
 
             ppk2 = PPK2_API(port)
             ppk2.get_modifiers()
@@ -108,8 +103,61 @@ class PowerMonitor:
                 + (f" at {voltage_mv} mV" if mode == "source" else ""))
             return monitor
         except Exception as exc:                       # noqa: BLE001 - see docstring
-            log(f"power: PPK2 setup failed ({exc}) — continuing without energy measurement")
+            holder = cls._port_holder(port)
+            if holder:
+                # By far the most common cause, and the library's own error ("device reports
+                # readiness to read but returned no data") gives no hint of it.
+                log(f"power: {port} is held by {holder} — close it and re-run "
+                    f"(the nRF Connect Power Profiler keeps the port open)")
+            else:
+                log(f"power: PPK2 setup failed ({exc}) — continuing without energy measurement")
             return None
+
+    @staticmethod
+    def _find_port(log):
+        """The PPK2's *data* interface.
+
+        A PPK2 presents two CDC-ACM interfaces and `list_devices()` returns both, unordered. Only
+        the lower one carries the measurement stream; opening the other yields a trickle of
+        nonsense - in testing, 24 samples in 3 s averaging 81 A. So resolve through
+        /dev/serial/by-id and take the lowest interface number rather than trusting list order.
+        """
+        from ppk2_api.ppk2_api import PPK2_API
+
+        by_id = Path("/dev/serial/by-id")
+        if by_id.is_dir():
+            candidates = sorted(
+                (int(re.search(r"-if(\d+)", p.name).group(1)), p.resolve())
+                for p in by_id.glob("*PPK2*") if re.search(r"-if(\d+)", p.name))
+            if candidates:
+                return str(candidates[0][1])
+
+        devices = PPK2_API.list_devices()
+        ports = sorted(d[0] if isinstance(d, (tuple, list)) else d for d in devices)
+        if not ports:
+            log("power: no PPK2 found — continuing without energy measurement")
+            return None
+        return ports[0]
+
+    @staticmethod
+    def _port_holder(port):
+        """Name the process holding `port`, by scanning /proc. Returns None if nothing does."""
+        if not port:
+            return None
+        try:
+            for proc in Path("/proc").iterdir():
+                if not proc.name.isdigit():
+                    continue
+                try:
+                    for link in (proc / "fd").iterdir():
+                        if str(link.resolve()) == port:
+                            name = (proc / "comm").read_text().strip()
+                            return f"{name} (pid {proc.name})"
+                except (OSError, PermissionError):
+                    continue
+        except OSError:
+            pass
+        return None
 
     # -- lifecycle ------------------------------------------------------------------------
 

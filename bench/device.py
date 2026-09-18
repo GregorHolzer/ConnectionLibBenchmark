@@ -173,8 +173,21 @@ class Device:
             self._serial.reset_input_buffer()
 
 
+# USB vendor IDs that are emphatically not benchmark boards. The PPK2 is the one that matters:
+# it presents *two* CDC-ACM interfaces, so an unfiltered scan on a bench with the power monitor
+# attached sees four serial devices instead of two and either fails the "expected exactly 2" check
+# or, worse, hands a PPK2 interface to the flasher.
+NON_BOARD_VIDS = {
+    "1915",   # Nordic Semiconductor — Power Profiler Kit II
+}
+
+
 def detect_ports(pio="pio"):
-    """The two real USB serial devices, ignoring the virtual /dev/ttyS* that flood Linux."""
+    """The real USB serial devices that could be benchmark boards.
+
+    Ignores the virtual /dev/ttyS* that flood Linux, and anything whose vendor ID is known not to
+    be a board (see NON_BOARD_VIDS).
+    """
     result = subprocess.run([pio, "device", "list"], capture_output=True, text=True, check=True)
     ports, current = [], None
     for line in result.stdout.splitlines():
@@ -182,7 +195,9 @@ def detect_ports(pio="pio"):
         if line.startswith("/dev/tty") and not line.startswith("/dev/ttyS"):
             current = line
         elif line.startswith("Hardware ID:") and "USB VID" in line and current:
-            ports.append(current)
+            match = re.search(r"VID:PID=([0-9A-Fa-f]{4}):", line)
+            if not match or match.group(1).lower() not in NON_BOARD_VIDS:
+                ports.append(current)
             current = None
     return ports
 
