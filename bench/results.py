@@ -48,7 +48,8 @@ class ResultWriter:
                     continue
         return done
 
-    def write_point(self, run, header, exchanges, summary, node_rx, node_summary, started_at):
+    def write_point(self, run, header, exchanges, summary, node_rx, node_summary, started_at,
+                    energy=None):
         point = run.point
         prefix = [run.index, run.rotation, point.tech, point.factor, point.level, point.key]
 
@@ -85,6 +86,7 @@ class ResultWriter:
             "header": header,
             "summary": summary,
             "node_summary": node_summary,
+            "energy": energy,
             "exchange_count": len(exchanges),
             "node_rx_count": len(node_rx),
         }) + "\n")

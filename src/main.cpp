@@ -65,6 +65,17 @@ uint32_t g_pointsRun = 0;
 // The T-Beam's SX1278 hangs off the AXP2101's ALDO2 rail, which is off at boot. Enabled once at
 // startup rather than per-configuration: the rail takes time to settle, and toggling it between
 // every LoRa point would add a confound the measurement cannot see.
+//
+// ALDO3 (GPS) is explicitly *disabled*. The GPS is never initialised by this firmware, so it was
+// only ever a constant load of tens of milliamps - which is fine for latency but ruinous for
+// energy, where it sits under every measurement and compresses the per-technology differences the
+// benchmark exists to resolve. Disabling has to be explicit rather than merely "not enabling":
+// the AXP2101 keeps its rail state across an ESP32 reset, so a rail left on by whatever firmware
+// ran previously stays on.
+//
+// Rail mapping (ALDO2 = LoRa, ALDO3 = GPS) comes from the tbeam_rails diagnostic, not from
+// guesswork. The rail states are reported over INFO so the measured configuration is recorded
+// with the results rather than assumed.
 void setupPower() {
     Wire.begin(21, 22);
     if (!PMU.begin(Wire, AXP2101_SLAVE_ADDRESS, 21, 22)) {
@@ -73,7 +84,22 @@ void setupPower() {
     }
     PMU.setALDO2Voltage(3300);
     PMU.enableALDO2();
-    Serial.println("INFO,pmu,aldo2-enabled");
+    PMU.disableALDO3();
+    Serial.println("INFO,pmu,aldo2-enabled-aldo3-disabled");
+}
+
+/** @brief Every AXP2101 rail's state, so the measured board configuration is on the record. */
+void emitRailState() {
+    Serial.printf("INFO,railALDO1,%d:%u\n", PMU.isEnableALDO1() ? 1 : 0, PMU.getALDO1Voltage());
+    Serial.printf("INFO,railALDO2,%d:%u\n", PMU.isEnableALDO2() ? 1 : 0, PMU.getALDO2Voltage());
+    Serial.printf("INFO,railALDO3,%d:%u\n", PMU.isEnableALDO3() ? 1 : 0, PMU.getALDO3Voltage());
+    Serial.printf("INFO,railALDO4,%d:%u\n", PMU.isEnableALDO4() ? 1 : 0, PMU.getALDO4Voltage());
+    Serial.printf("INFO,railDC1,%d:%u\n", PMU.isEnableDC1() ? 1 : 0, PMU.getDC1Voltage());
+#if defined(BENCH_HAS_DISPLAY)
+    Serial.println("INFO,display,on");
+#else
+    Serial.println("INFO,display,off");
+#endif
 }
 
 /**
@@ -288,6 +314,7 @@ void emitInfo() {
     Serial.printf("INFO,sdkVersion,%s\n", ESP.getSdkVersion());
     Serial.printf("INFO,freeHeap,%lu\n", static_cast<unsigned long>(ESP.getFreeHeap()));
     Serial.printf("INFO,pointsRun,%lu\n", static_cast<unsigned long>(g_pointsRun));
+    emitRailState();
     Serial.println("INFO,end,ok");
 }
 
@@ -380,6 +407,49 @@ void handleRun() {
     showStatus("done");
 }
 
+/**
+ * @brief Hold the current configuration for a fixed time without exchanging anything.
+ *
+ * This is the standing-cost measurement, and it may matter more than the active one. A node that
+ * must live months on an 18650 spends nearly all its time not transmitting, so what the radio
+ * costs while merely *able* to receive dominates the energy budget - and the three differ
+ * enormously there: ESP-NOW cannot receive without WiFi up, LoRa sits in continuous receive, the
+ * XBee idles on its own. A technology can lose the energy comparison outright on idle current no
+ * matter how efficient it is per packet, and only this measurement would show it.
+ *
+ * The node keeps polling during the hold so it stays in exactly the receive state it uses during a
+ * real run; poll() is non-blocking on all three backends, so this measures the idle radio rather
+ * than an artificially quiescent one.
+ */
+void handleIdle(char *args) {
+    if (!g_configured) {
+        Serial.println("ERR,not configured");
+        return;
+    }
+    uint32_t durationMs = strtoul(args, nullptr, 10);
+    if (durationMs == 0 || durationMs > 600000) {
+        Serial.println("ERR,IDLE needs a duration in ms, 1..600000");
+        return;
+    }
+
+    showStatus("idle hold");
+    uint32_t start = millis();
+    uint32_t polls = 0;
+    while (millis() - start < durationMs) {
+        if (g_transport) {
+            g_transport->poll();   // stay in the receive state a real run would be in
+            polls++;
+        }
+        delay(1);
+    }
+
+    Serial.printf("PPI,%s,%lu,%lu\n", techName(g_config.tech),
+                   static_cast<unsigned long>(millis() - start),
+                   static_cast<unsigned long>(polls));
+    Serial.println("RDY");
+    showStatus("idle done");
+}
+
 void handleLine(char *line) {
     while (*line == ' ' || *line == '\t') {
         line++;
@@ -390,6 +460,8 @@ void handleLine(char *line) {
 
     if (strncmp(line, "CFG", 3) == 0) {
         handleConfigure(line + 3);
+    } else if (strncmp(line, "IDLE", 4) == 0) {
+        handleIdle(line + 4);
     } else if (strcmp(line, "RUN") == 0) {
         handleRun();
     } else if (strcmp(line, "PING") == 0) {

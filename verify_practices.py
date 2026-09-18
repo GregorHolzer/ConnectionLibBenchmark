@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench.analysis import (describe, linear_regression, median_confidence_interval, percentile,
-                            gross_outliers, rank_stability, triscale_runs_needed)
+                            gross_outliers, idle_baselines, rank_stability,
+                            triscale_runs_needed)
 from bench.results import load_meta, load_node_rx, load_points, load_raw
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -530,6 +531,31 @@ def audit_reliability(report, meta, points, raw):
                    f"95% CI on the median spans {statistics.median(widths) * 100:.1f}% of the "
                    f"median (typical), {percentile(widths, 90) * 100:.1f}% at the 90th percentile "
                    f"of points")
+
+    # Energy figures must come with the baseline that makes them interpretable.
+    energy_points = [p for p in points if p.get("energy") and p.get("factor") != "idle"]
+    if not energy_points:
+        report.add(section, "", "Energy baselines", SKIP,
+                   "no energy measurements in this campaign (no PPK2 attached)")
+    else:
+        baselines = idle_baselines(points)
+        orphans = [p["point_key"] for p in energy_points
+                   if (p["tech"], p["rotation"]) not in baselines]
+        floors = [r for (t, r) in baselines if t == "none"]
+        if orphans:
+            report.add(section, "", "Energy baselines", FAIL,
+                       f"{len(orphans)}/{len(energy_points)} energy figures have no idle "
+                       f"measurement from the same repetition, e.g. {orphans[0]}. An energy "
+                       f"number without its baseline cannot be separated into what the radio "
+                       f"costs to run and what the traffic costs.")
+        elif not floors:
+            report.add(section, "", "Energy baselines", WARN,
+                       "per-technology idle present but no board floor (tech=none) — the ESP32's "
+                       "own draw cannot be separated from the radio's")
+        else:
+            report.add(section, "", "Energy baselines", PASS,
+                       f"every one of {len(energy_points)} energy figures has a matching "
+                       f"per-technology idle and a board floor from the same repetition")
 
     # Duty-cycle compliance, from measured airtime rather than intent.
     airtime = meta.get("lora_airtime_total_s")

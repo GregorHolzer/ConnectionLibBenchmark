@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Records the firmware emits. Matched on prefix because the Zigbee log interleaves raw XBee API
 # frame bytes with the text, so a line is not guaranteed to start where the record does.
-RECORD_PREFIXES = ("PPH,", "PPD,", "PPS,", "PPN,", "PPM,", "INFO,")
+RECORD_PREFIXES = ("PPH,", "PPD,", "PPS,", "PPN,", "PPM,", "PPI,", "INFO,")
 
 
 class DeviceError(RuntimeError):
@@ -127,6 +127,16 @@ class Device:
         """Gateway only: run the configured point to completion. Returns the raw records."""
         self._write("RUN")
         _, records = self._read_until(("RDY",), timeout_s)
+        return records
+
+    def idle(self, duration_ms, timeout_s=None):
+        """Hold the current configuration without exchanging anything - the standing-cost window.
+
+        The board stays in exactly the receive state it uses during a real run, so this measures an
+        idle radio rather than an artificially quiescent one.
+        """
+        self._write(f"IDLE {int(duration_ms)}")
+        _, records = self._read_until(("RDY", "ERR,"), timeout_s or (duration_ms / 1000.0 + 30))
         return records
 
     def drain(self, seconds=0.3):

@@ -70,6 +70,15 @@ def parse_records(records):
                     "rssi_dbm": _optional_float(fields[4]),
                     "snr_db": _optional_float(fields[5]),
                 })
+            elif kind == "PPI" and len(fields) >= 4:
+                summary = {
+                    "idle": True,
+                    "tech": fields[1],
+                    "elapsed_ms": int(fields[2]),
+                    "polls": int(fields[3]),
+                    "successes": 0, "attempts": 0, "retries": 0,
+                    "duty_pct": 0.0, "send_us_total": 0, "duty_blocked": 0,
+                }
             elif kind == "PPM" and len(fields) >= 5:
                 node_summary = {
                     "rx_distinct": int(fields[1]),

@@ -113,10 +113,25 @@ def cost_per_repetition(module):
 
 
 def allocate(budget_hours, techs, shares=None):
-    """Repetitions per technology for a given wall-clock budget."""
+    """Repetitions per technology for a given wall-clock budget.
+
+    Two passes, because the idle points are scheduled once per rotation and sit outside the
+    per-technology point lists: a first pass does not know how many rotations there will be, so it
+    cannot reserve their time, and would over-commit the budget.
+    """
+    first = _allocate_once(budget_hours * 3600.0, techs, shares)
+    rotations = max(entry["repetitions"] for entry in first.values())
+    idle_cost = rotations * (1 + len(techs)) * (technologies.IDLE_SECONDS + POINT_OVERHEAD_S)
+
+    plan = _allocate_once(max(budget_hours * 3600.0 - idle_cost, 60.0), techs, shares)
+    for entry in plan.values():
+        entry["idle_reserved_s"] = round(idle_cost, 1)
+    return plan
+
+
+def _allocate_once(budget_s, techs, shares=None):
     shares = shares or DEFAULT_SHARES
     total_share = sum(shares.get(t, 0.0) for t in techs) or 1.0
-    budget_s = budget_hours * 3600.0
 
     plan = {}
     for tech in techs:
@@ -143,9 +158,15 @@ def build_schedule(plan, techs):
     """
     point_lists = {tech: technologies.get(tech).points() for tech in techs}
     max_reps = max(plan[t]["repetitions"] for t in techs)
+    idle = technologies.idle_points(techs)
 
     schedule, index = [], 0
     for rotation in range(max_reps):
+        # Standing-cost measurements lead every rotation, so each one is repeated as often as the
+        # rotations themselves and gets the same reproducibility treatment as the active points.
+        for point in idle:
+            schedule.append(ScheduledRun(index, rotation, point))
+            index += 1
         for tech in techs:
             if rotation >= plan[tech]["repetitions"]:
                 continue
@@ -162,9 +183,11 @@ class CampaignRunner:
     """Executes a schedule against the two boards, streaming results to disk as it goes."""
 
     def __init__(self, gateway, node, gateway_peer, node_peer, out_dir, writer, status_path,
-                 log=print):
+                 log=print, power=None):
         self.gateway = gateway
         self.node = node
+        # Optional PPK2. None means the campaign runs exactly as before, without energy columns.
+        self.power = power
         # Each board's peer is the *other* board: the gateway unicasts to the node's address and
         # the node replies to the gateway's. Handing both the same peer would make ESP-NOW talk
         # to itself and every exchange time out.
@@ -209,6 +232,39 @@ class CampaignRunner:
 
         self.status_path.write_text(json.dumps(status, indent=2))
 
+    def _run_idle(self, run):
+        """Standing-cost measurement: configure, then hold without exchanging.
+
+        Both boards are configured so the *pair* is in the state a real run leaves it in - the node
+        is what carries the PPK2, and its idle current is the number that matters.
+        """
+        tech = run.point.tech
+        if tech == "none":
+            params = {"tech": "none", "payload": 32, "n": 1}
+            node_params = dict(params)
+        else:
+            module = technologies.get(tech)
+            params = module.cfg_params(run.point, self.gateway_peer)
+            node_params = module.cfg_params(run.point, self.node_peer)
+            node_params.pop("n", None)
+
+        self.node.configure(node_params)
+        self.gateway.configure(params)
+
+        started_at = time.time()
+        duration_ms = technologies.IDLE_SECONDS * 1000
+        window = self.power.open(run.point.key, run.rotation) if self.power else None
+        # Only the node holds. It is the instrumented board, and a gateway that is configured but
+        # not running never transmits - it just polls - so it is already idle and cannot perturb
+        # the measurement. Idling it as well would double the cost of every idle point and stretch
+        # the energy window across two phases in which the node was in different states.
+        records = self.node.idle(duration_ms)
+        energy = self.power.close(window) if window else None
+
+        _, _, summary, _, _ = parse_records(records)
+        self.writer.write_point(run, {}, [], summary, [], None, started_at, energy=energy)
+        return summary is not None, [], summary
+
     def run_one(self, run, exchanges_override=None):
         """Execute one configuration point.
 
@@ -216,6 +272,9 @@ class CampaignRunner:
         the budget accordingly - charging the full amount for a 10-exchange run would make the
         pacing wrong in the safe direction, but wrong all the same.
         """
+        if run.point.factor == "idle":
+            return self._run_idle(run)
+
         module = technologies.get(run.tech)
         params = module.cfg_params(run.point, self.gateway_peer)
         airtime = module.airtime_seconds(run.point)
@@ -238,14 +297,19 @@ class CampaignRunner:
 
         started_at = time.time()
         timeout = module.estimated_seconds(run.point) * 3 + 60
+        # The energy window brackets only the measured exchange, not the CFG teardown and rebuild
+        # that precedes it - otherwise every point would carry the cost of constructing a Transport.
+        window = self.power.open(run.point.key, run.rotation) if self.power else None
         records = self.gateway.run(timeout_s=timeout)
+        energy = self.power.close(window) if window else None
         node_records = self.node.drain(0.5)
         self.airtime.record(airtime)
 
         _, exchanges, summary, _, _ = parse_records(records)
         _, _, _, node_rx, node_summary = parse_records(node_records)
 
-        self.writer.write_point(run, header, exchanges, summary, node_rx, node_summary, started_at)
+        self.writer.write_point(run, header, exchanges, summary, node_rx, node_summary, started_at,
+                                 energy=energy)
 
         expected = exchanges_override or module.exchanges(run.point)
         ok = summary is not None and summary["successes"] >= expected

@@ -388,6 +388,145 @@ def plot_ecdf_per_repetition(raw, tech, out_dir):
     save(fig, out_dir, f"reliability-{tech}-ecdf-per-repetition")
 
 
+def plot_standing_current(points, out_dir):
+    """What each radio costs while merely able to receive.
+
+    Very possibly the headline energy result. A satellite that must last months spends nearly all
+    its time not transmitting, so standing current, not per-packet efficiency, is what sets battery
+    life — and a radio can lose the comparison outright here no matter how cheap its packets are.
+    The board floor is drawn as a reference line so the radio's own share is visible rather than
+    buried in the ESP32's draw.
+    """
+    from bench.analysis import idle_baselines
+
+    baselines = idle_baselines(points)
+    if not baselines:
+        return
+    rotations = defaultdict(list)
+    for (tech, _), mean_ua in baselines.items():
+        rotations[tech].append(mean_ua)
+    floor = rotations.pop("none", None)
+    present = [t for t in TECH_ORDER if t in rotations]
+    if not present:
+        return
+
+    fig, ax = plt.subplots(figsize=(6.8, 4.2))
+    fig.patch.set_facecolor(SURFACE)
+    positions = range(len(present))
+    for i, tech in zip(positions, present):
+        values = rotations[tech]
+        median = statistics.median(values)
+        ax.bar(i, median / 1000.0, color=COLOR[tech], width=0.55, zorder=3)
+        # Every repetition as a dot, so reproducibility is visible rather than asserted.
+        for value in values:
+            ax.plot(i, value / 1000.0, marker="_", markersize=18, color=INK_2, alpha=0.7,
+                     zorder=4)
+        ax.text(i, median / 1000.0, f" {median / 1000.0:.1f} mA", ha="center", va="bottom",
+                 color=INK_2, fontsize=9)
+
+    subtitle = "median of all repetitions; each tick is one repetition"
+    if floor:
+        floor_ma = statistics.median(floor) / 1000.0
+        ax.axhline(floor_ma, color=INK_2, linewidth=1.4, linestyle="--", zorder=5)
+        ax.text(0.99, floor_ma, f"board floor {floor_ma:.1f} mA (all radios down)  ",
+                 transform=ax.get_yaxis_transform(), ha="right", va="bottom", color=INK_2,
+                 fontsize=9)
+        subtitle += ". Everything above the dashed line is the radio's own standing cost."
+
+    style_axes(ax, "", "mean current while idle (mA)",
+                "Standing cost: what each radio draws doing nothing", subtitle)
+    ax.set_xticks(list(positions))
+    ax.set_xticklabels([LABEL[t] for t in present])
+    save(fig, out_dir, "energy-standing-current")
+
+
+def plot_energy_per_delivered(points, out_dir):
+    """Energy per delivered payload, absolute and above idle, per technology."""
+    from bench.analysis import idle_baselines, point_energy
+
+    baselines = idle_baselines(points)
+    absolute, excess = defaultdict(list), defaultdict(list)
+    for point in points:
+        if point.get("factor") == "idle":
+            continue
+        energy = point_energy(point, baselines)
+        if not energy:
+            continue
+        if "energy_per_delivered_mj" in energy:
+            absolute[point["tech"]].append(energy["energy_per_delivered_mj"])
+        if "excess_energy_per_delivered_mj" in energy:
+            excess[point["tech"]].append(energy["excess_energy_per_delivered_mj"])
+    present = [t for t in TECH_ORDER if absolute.get(t)]
+    if not present:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.2))
+    fig.patch.set_facecolor(SURFACE)
+    for ax, (data, title) in zip(axes, [(absolute, "total, including idle draw"),
+                                         (excess, "above idle — what the traffic itself cost")]):
+        series = [data[t] for t in present if data.get(t)]
+        techs = [t for t in present if data.get(t)]
+        if not series:
+            ax.set_visible(False)
+            continue
+        box = ax.boxplot(series, positions=range(len(techs)), widths=0.5, patch_artist=True,
+                          showfliers=False, medianprops=dict(color=SURFACE, linewidth=1.5))
+        for patch, tech in zip(box["boxes"], techs):
+            patch.set_facecolor(COLOR[tech])
+            patch.set_edgecolor("none")
+        for element in ("whiskers", "caps"):
+            for line in box[element]:
+                line.set_color(INK_2)
+                line.set_linewidth(1.0)
+        style_axes(ax, "", "mJ per delivered payload", title)
+        ax.set_xticks(range(len(techs)))
+        ax.set_xticklabels([LABEL[t] for t in techs])
+        ax.set_yscale("log")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+
+    fig.suptitle("Energy per delivered payload, across all configurations", color=INK,
+                  fontsize=12, x=0.02, ha="left", y=1.02)
+    save(fig, out_dir, "energy-per-delivered")
+
+
+def plot_power_trace(results_dir, out_dir):
+    """The retained waveforms: current against time for each technology's baseline.
+
+    One figure where the per-packet cost is visible as structure rather than as a number — the TX
+    bursts, their width, and the idle level they sit on.
+    """
+    trace_dir = Path(results_dir) / "power_traces"
+    if not trace_dir.exists():
+        return
+    traces = sorted(trace_dir.glob("*.csv"))
+    if not traces:
+        return
+
+    fig, axes = plt.subplots(len(traces), 1, figsize=(8.0, 2.4 * len(traces)), sharex=False)
+    fig.patch.set_facecolor(SURFACE)
+    axes = axes if len(traces) > 1 else [axes]
+
+    for ax, path in zip(axes, traces):
+        tech = next((t for t in TECH_ORDER if path.name.startswith(t)), "espnow")
+        duration, values = 0.0, []
+        with path.open() as handle:
+            for line in handle:
+                if line.startswith("# duration_s="):
+                    duration = float(line.split("duration_s=")[1].split()[0])
+                elif line and line[0].isdigit():
+                    values.append(float(line.split(",")[1]))
+        if not values:
+            continue
+        step = duration / len(values) if duration else 1.0
+        xs = [i * step for i in range(len(values))]
+        ax.plot(xs, [v / 1000.0 for v in values], color=COLOR[tech], linewidth=0.6)
+        style_axes(ax, "time (s)", "current (mA)", f"{LABEL[tech]} — baseline configuration")
+
+    fig.suptitle("Current traces: the shape behind the energy numbers", color=INK, fontsize=12,
+                  x=0.02, ha="left", y=1.0)
+    save(fig, out_dir, "energy-current-traces")
+
+
 def plot_overview(raw, points, out_dir):
     """Cross-technology baseline comparison, on a log axis — three orders of magnitude apart."""
     grouped = samples(raw)
@@ -457,6 +596,9 @@ def main():
             factors_seen[point["tech"]].add(point["factor"])
 
     plot_overview(raw, points, out_dir)
+    plot_standing_current(points, out_dir)
+    plot_energy_per_delivered(points, out_dir)
+    plot_power_trace(results_dir, out_dir)
     for tech in techs:
         for factor in sorted(factors_seen.get(tech, ())):
             plot_factor(raw, points, tech, factor, out_dir)

@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench import technologies
 from bench.campaign import PRESETS, CampaignRunner, allocate, build_schedule
 from bench.device import Device, detect_ports, ensure_pyserial, flash, read_mac_for_port
+from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.results import ResultWriter, write_meta
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -78,6 +79,18 @@ def main():
                          help="the boards already run the current firmware")
     parser.add_argument("--dry-run", action="store_true",
                          help="print the plan and the schedule, touch no hardware")
+    parser.add_argument("--power-port",
+                         help="PPK2 serial port (auto-detected if a PPK2 is attached)")
+    parser.add_argument("--power-voltage-mv", type=int, default=DEFAULT_VOLTAGE_MV,
+                         help="source-meter voltage; 3900 is Li-ion mid-discharge")
+    parser.add_argument("--power-mode", choices=["source", "ampere"], default="source",
+                         help="source: PPK2 powers the node from its battery terminal. ampere: "
+                              "PPK2 sits in series with an externally powered rail")
+    parser.add_argument("--no-power", action="store_true",
+                         help="skip energy measurement even if a PPK2 is attached")
+    parser.add_argument("--control-campaign",
+                         help="name of an earlier campaign this one should be compared against "
+                              "(e.g. a pre-strip run, to show the strip changed only power)")
     args = parser.parse_args()
 
     budget_hours = args.budget_hours or PRESETS[args.preset]
@@ -144,6 +157,12 @@ def main():
         print(f"gateway says: {gateway.ping()}   node says: {node.ping()}")
         device_info = {"gateway": gateway.info(), "node": node.info()}
 
+        # Started before the metadata is written so the record says whether energy was actually
+        # being captured, rather than whether it was asked for.
+        power = None if args.no_power else PowerMonitor.create(
+            port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
+            raw_dir=out_dir / "power_traces")
+
         write_meta(out_dir, {
             "started_at": time.time(),
             "started_at_iso": datetime.now().isoformat(timespec="seconds"),
@@ -156,6 +175,9 @@ def main():
             "node_port": node_port,
             "peer": peer,
             "device_info": device_info,
+            "power": ({"mode": args.power_mode, "voltage_mv": args.power_voltage_mv,
+                        "measured_board": "node"} if power else None),
+            "control_campaign": args.control_campaign,
             "benchmark_git_sha": git_sha(REPO_ROOT),
             "connectionlib_git_sha": git_sha(REPO_ROOT / "ConnectionLib"),
             # Practice P14: record the full configuration space, not only what was reached.
@@ -167,7 +189,7 @@ def main():
         })
 
         runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
-                                 out_dir / "status.json")
+                                 out_dir / "status.json", power=power)
         started = time.time()
 
         for run in schedule:
@@ -175,7 +197,10 @@ def main():
                 runner.completed += 1
                 continue
 
-            module = technologies.get(run.tech)
+            # Idle points have no technology module — the board floor is not any one radio's, and
+            # they exchange nothing, so expected-count reporting does not apply to them.
+            is_idle = run.point.factor == "idle"
+            module = None if is_idle else technologies.get(run.tech)
             elapsed = time.time() - started
             print(f"[{runner.completed + 1}/{len(schedule)}] {format_duration(elapsed)} "
                   f"rot={run.rotation} {run.point.key}", flush=True)
@@ -190,7 +215,10 @@ def main():
                 runner.completed += 1
                 continue
 
-            if ok and exchanges:
+            if is_idle:
+                held = summary.get("elapsed_ms", 0) / 1000.0 if summary else 0.0
+                print(f"    idle held {held:.0f}s")
+            elif ok and exchanges:
                 rtts = sorted(e["rtt_us"] for e in exchanges if e["ok"])
                 median = rtts[len(rtts) // 2] / 1000.0 if rtts else 0.0
                 print(f"    ok  {summary['successes']}/{module.exchanges(run.point)}  "
@@ -204,6 +232,8 @@ def main():
             runner._write_status(schedule)
 
         runner._write_status(schedule)
+        if power:
+            power.stop()
 
     writer.close()
 
@@ -212,6 +242,8 @@ def main():
     meta["elapsed_s"] = round(time.time() - started, 1)
     meta["failures"] = runner.failures
     meta["lora_airtime_total_s"] = round(runner.airtime.total_s, 1)
+    if power:
+        meta["power_samples_total"] = power.total_samples
     meta["duty_wait_total_s"] = round(runner.duty_wait_total_s, 1)
     write_meta(out_dir, meta)
 

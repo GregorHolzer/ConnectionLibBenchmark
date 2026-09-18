@@ -49,8 +49,33 @@ from . import espnow, lora, zigbee   # noqa: E402
 REGISTRY = {"lora": lora, "espnow": espnow, "zigbee": zigbee}
 ALL = ["espnow", "lora", "zigbee"]
 
+# How long to hold each idle measurement. Long enough for the PPK2 to average over any periodic
+# housekeeping the stack does, short enough that ~4 of them per rotation cost minutes, not hours.
+IDLE_SECONDS = 30
+
 
 def get(name):
     if name not in REGISTRY:
         raise KeyError(f"unknown technology {name!r}; known: {', '.join(REGISTRY)}")
     return REGISTRY[name]
+
+
+def idle_points(techs):
+    """The standing-cost measurements: a board floor plus one per technology.
+
+    These exist because for a node that must live months on a battery, what a radio costs while
+    merely *able* to receive very likely dominates what it costs to send. The three are not close -
+    ESP-NOW cannot receive without WiFi up, LoRa sits in continuous receive, the XBee idles on its
+    own - so a technology can lose the energy comparison outright on idle current regardless of how
+    efficient it is per packet. Active-only measurement would never reveal that.
+
+    The floor point (`tech=none`, every radio down) is what makes the others interpretable:
+    subtracting it separates the radio's standing cost from the ESP32's.
+    """
+    points = [Point("none", "idle", "floor", {"tech": "none", "payload": 32})]
+    for tech in techs:
+        module = get(tech)
+        params = dict(module.BASELINE)
+        params["tech"] = tech
+        points.append(Point(tech, "idle", "standing", params))
+    return points

@@ -79,6 +79,11 @@ def remaining_estimate(meta, done):
     # other two technologies' real work and under-report the total by hours.
     measured, airtime = defaultdict(float), defaultdict(float)
     for run in schedule[done:]:
+        if run.point.factor == "idle":
+            # Fixed hold, and no transmission at all — an idle radio is receiving, not sending,
+            # so idle points cost no airtime against the duty cycle.
+            measured[run.tech] += technologies.IDLE_SECONDS + POINT_OVERHEAD_S
+            continue
         module = technologies.get(run.tech)
         measured[run.tech] += module.estimated_seconds(run.point) + POINT_OVERHEAD_S
         airtime[run.tech] += module.airtime_seconds(run.point)

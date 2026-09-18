@@ -19,6 +19,8 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 | Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
 | Duty cycle | domain | — | Airtime consumed against the rolling-window budget. |
 | RSSI / SNR | low-level | — | Where the radio exposes it: LoRa both, Zigbee neither via this API, ESP-NOW neither. |
+| **Energy per delivered payload** | domain | — | Measured with a Nordic PPK2 source-metering the **node**'s battery rail at 3.9 V. See below. |
+| **Standing current** | domain | — | Mean current with the radio configured but idle — very likely the figure that decides battery life. |
 
 ### Why `rtt_us` and `send_us` are separate
 
@@ -41,6 +43,39 @@ exchange is a strict request/response with at most one packet in flight, so late
 happen to be closely coupled here — but deriving one from the other would bake that assumption
 into the data, and it stops holding the moment any pipelining is introduced.
 
+### Energy
+
+Measured with a **Nordic PPK2 source-metering the node board's battery terminal at 3.9 V** — the
+rail a deployed satellite actually runs from, at a mid-discharge voltage rather than a flattering
+freshly-charged one. The 18650 is removed (a cell in the holder buffers every current spike, so you
+would measure the charger instead) and the node's USB carries data only, with VBUS cut: otherwise
+the AXP2101 runs from USB and the battery rail reads zero.
+
+The board is **stripped for these measurements**: the GPS rail (ALDO3) is disabled in firmware and
+the OLED is not compiled in. Neither is used by the benchmark, so both were purely constant loads —
+harmless for latency, but for energy they sit under every measurement and compress exactly the
+per-technology differences the comparison exists to resolve.
+
+Three quantities, and the difference between them matters:
+
+| | What it answers |
+|---|---|
+| **Board floor** (`tech=none`, idle) | what the ESP32 costs with every radio down |
+| **Standing current** (radio configured, idle) | what this radio costs while merely *able* to receive |
+| **Energy per delivered payload** (active) | what moving a message costs |
+
+Reported both absolute and **above idle**, because they lead to different decisions. For a node
+that must last months, standing current very likely dominates: it applies continuously while
+per-packet energy applies only during the small fraction of time the node transmits. A radio can
+therefore lose the energy comparison outright on idle current regardless of how efficient its
+packets are — and ESP-NOW cannot receive at all without WiFi up, where LoRa sits in continuous
+receive at an order of magnitude less.
+
+**The caveat that bounds all of it:** this harness never sleeps. What is measured is energy during
+*active operation*, which is the right basis for comparing the three technologies against each
+other. Absolute battery life needs a duty-cycled sleep model layered on top, since a real satellite
+spends almost all its time asleep and this benchmark spends none of it.
+
 ## Not measured — and why
 
 These are asked for by the thesis exposé's RQ1 metric set. They are listed here, and printed by
@@ -51,10 +86,6 @@ the analysis tooling, rather than silently omitted.
 Round-trip ÷ 2 is not a substitute: these links are strongly asymmetric — a Zigbee gateway
 broadcast leg and the node's unicast reply differ by an order of magnitude. Round-trip latency and
 its variation are reported instead, and labelled as such.
-
-**Energy per delivered payload.** The binding requirement for FORTE (months of battery life), but
-it needs an external power monitor on the board's supply rail. Nothing available over the serial
-link approximates it.
 
 **PHY-level payload efficiency.** `totalBytes` counts framing that **ConnectionLib** adds — LoRa's
 6-byte software header, which exists because raw SX1278 has no addressing, versus zero added bytes
