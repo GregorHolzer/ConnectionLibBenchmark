@@ -1,0 +1,12 @@
+.pio/
+__pycache__/
+*.pyc
+
+# Course material (02_experimentation.pdf, Peter Thoman, University of Innsbruck) is summarised
+# in docs/benchmarking-practices.md and cited there rather than redistributed here.
+*.pdf
+
+# Campaign output. Regenerating a 10h campaign is expensive, so keep it — but keep it out of git
+# by default: raw.csv runs to hundreds of thousands of rows. Force-add a campaign worth keeping:
+#   git add -f results/campaign-YYYYMMDD-HHMMSS
+results/

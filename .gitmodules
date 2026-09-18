@@ -1,0 +1,3 @@
+[submodule "ConnectionLib"]
+	path = ConnectionLib
+	url = git@github.com:GregorHolzer/ConnectionLib.git
