@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Wake the benchmark desktop and wait until it is actually usable.
+
+    start_desktop              # wake and wait
+    start_desktop --timeout 90
+    start_desktop --no-wait    # send the packet and return immediately
+
+The desktop holds the LoRa/Zigbee/ESP-NOW boards and the PPK2; this Pi is the always-on jump host
+that can switch it on. Chain: VPN -> raspberrypi -> start_desktop -> ssh desktop.
+
+Three details this script exists to get right:
+
+* **The magic packet is built here rather than shelling out.** This Pi has no `wakeonlan`,
+  `etherwake` or `wol`, and adding an apt dependency to the box whose whole job is to be reliably
+  reachable is a poor trade for six lines of socket code.
+* **Waking needs no address**, only the MAC and a broadcast, so a lease change cannot stop the
+  machine from coming up - only from being found afterwards, which the fallback chain in
+  desktop_lib handles.
+* **Readiness is TCP/22, never ping.** The desktop drops ICMP, so a ping-based wait reports failure
+  on a machine that woke perfectly. Port 22 answering is also the condition you actually care
+  about: not "it has power" but "you can log in".
+"""
+
+import argparse
+import socket
+import sys
+import time
+
+import desktop_lib as lib
+
+
+def magic_packet(mac):
+    """6 bytes of 0xFF followed by the target MAC repeated 16 times."""
+    raw = bytes.fromhex(mac.replace(":", "").replace("-", ""))
+    if len(raw) != 6:
+        raise ValueError(f"not a MAC address: {mac!r}")
+    return b"\xff" * 6 + raw * 16
+
+
+def send_wake(mac, broadcast):
+    packet = magic_packet(mac)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # Port 9 (discard) is conventional; the NIC matches on the payload, not the port. 7 is
+        # sent too because some firmware only listens there.
+        for port in (9, 7):
+            sock.sendto(packet, (broadcast, port))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--mac", default=lib.MAC)
+    parser.add_argument("--host", help="override the address used for the readiness check")
+    parser.add_argument("--broadcast", default=lib.BROADCAST)
+    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--no-wait", action="store_true")
+    args = parser.parse_args()
+
+    # Idempotent: waking a machine that is already up is harmless, but saying so beats a pointless
+    # zero-second wait.
+    already = lib.resolve(args.host, timeout=1.5)
+    if already:
+        print(f"{already} is already up (ssh answering)")
+        return 0
+
+    print(f"sending magic packet to {args.mac} via {args.broadcast} ...")
+    try:
+        send_wake(args.mac, args.broadcast)
+    except OSError as exc:
+        print(f"failed to send: {exc}", file=sys.stderr)
+        return 1
+
+    if args.no_wait:
+        print("packet sent (not waiting)")
+        return 0
+
+    targets = lib.candidates(args.host)
+    print(f"waiting for ssh on {' / '.join(targets)} (up to {args.timeout:.0f}s)",
+          end="", flush=True)
+    started = time.time()
+    while time.time() - started < args.timeout:
+        address = lib.resolve(args.host, timeout=1.5)
+        if address:
+            print(f"\n{address} is up after {time.time() - started:.0f}s — ssh {address}")
+            return 0
+        print(".", end="", flush=True)
+        time.sleep(2)
+
+    print(f"\nno ssh after {args.timeout:.0f}s.")
+    print("Things to check, in the order they usually fail:")
+    print("  1. BIOS: 'Wake on LAN' / 'Power On By PCI-E' enabled, and ErP/EuP DISABLED")
+    print("     (ErP cuts standby power to the NIC — the usual reason suspend wakes but")
+    print("      a full power-off does not)")
+    print("  2. On the desktop: sudo ethtool enp3s0 | grep -i wake   -> want 'Wake-on: g'")
+    print("  3. Power really off, not unplugged — the NIC needs standby power")
+    print("  4. Wrong address rather than no wake? Try: start_desktop --host <ip>")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

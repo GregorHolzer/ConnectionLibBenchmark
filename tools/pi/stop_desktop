@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Shut the benchmark desktop down, unless it is in the middle of something.
+
+    stop_desktop
+    stop_desktop --force      # even with a campaign running, or one we cannot rule out
+    stop_desktop --suspend    # sleep instead of power off
+
+Refusing while a campaign runs is the point of this script rather than a nicety: a full campaign is
+ten hours of bench time and is not reproducible on a whim, and the moment you are most likely to
+reach for a remote power switch is the moment you have forgotten what the machine was doing.
+
+An *unknown* campaign state is treated the same as a running one. Powering off on a failed check
+is the one mistake this script exists to prevent.
+"""
+
+import argparse
+import sys
+
+import desktop_lib as lib
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--host")
+    parser.add_argument("--force", action="store_true",
+                         help="shut down even if a campaign is running or cannot be ruled out")
+    parser.add_argument("--suspend", action="store_true",
+                         help="suspend instead of powering off")
+    args = parser.parse_args()
+
+    address = lib.resolve(args.host)
+    if address is None:
+        print("no address answering — already off?")
+        return 0
+
+    state, detail = lib.campaign_state(address)
+    if state != "idle" and not args.force:
+        if state == "running":
+            print(f"a campaign is running on {address}:\n  {detail}")
+        else:
+            print(f"could not determine whether a campaign is running on {address} ({detail})")
+        print("\nrefusing to power off. Check with desktop_status, or override with --force.")
+        return 1
+    if state != "idle":
+        print(f"campaign state '{state}' — powering off anyway (--force)")
+
+    action = "suspend" if args.suspend else "poweroff"
+    print(f"{action}ing {address} ...")
+    # The machine going away tears the connection down, so a non-zero result here is expected and
+    # not worth reporting as a failure.
+    lib.ssh(address, f"systemctl {action}", timeout=15)
+    print("sent. Bring it back with:  start_desktop")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

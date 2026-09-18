@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Is the benchmark desktop up, and is it busy?
+
+    desktop_status
+
+Reports which address actually answered, uptime, what hardware is attached, and — the part that
+matters before you reach for stop_desktop — whether a campaign is running. A campaign state of
+"unknown" is reported as such and never as "idle".
+"""
+
+import argparse
+import sys
+
+import desktop_lib as lib
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--host", help="override the address (default: try mDNS, cache, then the "
+                                        "built-in IP)")
+    args = parser.parse_args()
+
+    address = lib.resolve(args.host)
+    if address is None:
+        print(f"host      tried: {', '.join(lib.candidates(args.host))}")
+        # Not "it is off": this host drops ICMP and we only ever learn that port 22 is silent,
+        # which is equally true while it boots.
+        print("ssh       no address answering — powered off, still booting, or unreachable")
+        print("\n  start it with:  start_desktop")
+        return 1
+
+    print(f"host      {address}")
+    print("ssh       answering")
+
+    ok, uptime = lib.ssh(address, "uptime -p")
+    if ok and uptime:
+        print(f"uptime    {uptime}")
+    ok, load = lib.ssh(address, "cut -d' ' -f1-3 /proc/loadavg")
+    if ok and load:
+        print(f"load      {load}")
+
+    # Counted separately because a PPK2 presents two CDC-ACM interfaces: a naive count of
+    # /dev/serial/by-id reports "2 devices" on a bench with no boards attached at all.
+    # `wc -l` rather than `grep -c`, because grep exits 1 on a zero count and the line would
+    # silently vanish instead of reading 0.
+    ok, boards = lib.ssh(address, "ls /dev/serial/by-id/ 2>/dev/null | grep -vi ppk2 | wc -l")
+    if ok:
+        print(f"boards    {boards} attached")
+    ok, ppk2 = lib.ssh(address, "ls /dev/serial/by-id/ 2>/dev/null | grep -i ppk2 | wc -l")
+    if ok:
+        print("ppk2      attached" if ppk2 != "0"
+              else "ppk2      not attached — energy will not be measured")
+
+    state, detail = lib.campaign_state(address)
+    if state == "running":
+        print(f"campaign  RUNNING — {detail}")
+        print("\n  do not power it off; stop_desktop will refuse without --force")
+    elif state == "idle":
+        print("campaign  idle")
+    else:
+        print(f"campaign  UNKNOWN ({detail})")
+        print("\n  could not ask — treat as possibly running")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
