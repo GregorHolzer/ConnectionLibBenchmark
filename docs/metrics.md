@@ -45,11 +45,19 @@ into the data, and it stops holding the moment any pipelining is introduced.
 
 ### Energy
 
-Measured with a **Nordic PPK2 source-metering the node board's battery terminal at 3.9 V** — the
-rail a deployed satellite actually runs from, at a mid-discharge voltage rather than a flattering
-freshly-charged one. The 18650 is removed (a cell in the holder buffers every current spike, so you
-would measure the charger instead) and the node's USB carries data only, with VBUS cut: otherwise
-the AXP2101 runs from USB and the battery rail reads zero.
+Measured with a **Nordic PPK2 source-metering the node board's 5 V header pin at 5.0 V** (left
+header pin 10, return on pin 9). The 18650 is removed — a cell in the holder buffers every current
+spike, so you would measure the charger instead — and the node's USB carries data only, with the
+cable's VBUS conductor cut: otherwise the host supplies the same net the PPK2 is sourcing and the
+measurement is meaningless.
+
+This tap is upstream of the AXP2101, so it includes the PMU's 5→3.3 V conversion loss and the
+onboard USB-serial bridge in every reading, floor and per-radio alike. **The deltas between
+technologies are therefore the trustworthy quantity; the absolute currents are inflated by a
+constant.** A battery-terminal tap at a mid-discharge 3.9 V would model a deployed satellite's
+rail more directly and exclude that overhead. Whether it is usable here is untested: it depends on
+whether the CH9102F bridge draws from the board's 3.3 V rail or from USB VBUS, and if the latter,
+a battery tap with VBUS cut leaves no serial link for the campaign to be driven over.
 
 The board is **stripped for these measurements**: the GPS rail (ALDO3) is disabled in firmware and
 the OLED is not compiled in. Neither is used by the benchmark, so both were purely constant loads —

@@ -1,8 +1,9 @@
 """Nordic Power Profiler Kit II capture, accumulated per configuration point.
 
-Wraps the IRNAS `ppk2-api` package. The PPK2 source-meters the **node** board through its battery
-terminal at 3.9 V - the rail a deployed satellite actually runs from - while the campaign runs
-normally over USB serial.
+Wraps the IRNAS `ppk2-api` package. The PPK2 source-meters the **node** board through its 5 V
+header pin (left header pin 10, return on pin 9) at 5.0 V, while the campaign runs normally over a
+USB cable whose VBUS conductor has been cut, so the host carries data but cannot also power the
+board.
 
 Two design decisions worth knowing:
 
@@ -28,9 +29,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Nominal Li-ion mid-discharge. Measuring at a freshly-charged 4.2 V would flatter every figure;
-# 3.9 V is representative of most of a cell's working life.
-DEFAULT_VOLTAGE_MV = 3900
+# The 5 V header pin feeds the same net as USB VBUS, so the board sees what a USB supply would
+# give it. This must match the rail actually being sourced: energy_mj is charge times this
+# voltage, so a mismatch scales every energy figure silently.
+DEFAULT_VOLTAGE_MV = 5000
 
 POLL_INTERVAL_S = 0.05
 MAX_RAW_SECONDS = 8.0   # cap on any single retained waveform

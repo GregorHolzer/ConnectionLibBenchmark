@@ -82,9 +82,9 @@ def main():
     parser.add_argument("--power-port",
                          help="PPK2 serial port (auto-detected if a PPK2 is attached)")
     parser.add_argument("--power-voltage-mv", type=int, default=DEFAULT_VOLTAGE_MV,
-                         help="source-meter voltage; 3900 is Li-ion mid-discharge")
+                         help="source-meter voltage; 5000 is the node's 5V header pin")
     parser.add_argument("--power-mode", choices=["source", "ampere"], default="source",
-                         help="source: PPK2 powers the node from its battery terminal. ampere: "
+                         help="source: PPK2 powers the node from its 5V header pin. ampere: "
                               "PPK2 sits in series with an externally powered rail")
     parser.add_argument("--no-power", action="store_true",
                          help="skip energy measurement even if a PPK2 is attached")

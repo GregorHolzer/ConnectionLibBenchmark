@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench import technologies
 from bench.campaign import CampaignRunner, ScheduledRun
 from bench.device import Device, detect_ports, ensure_pyserial, flash, read_mac_for_port
+from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.results import ResultWriter, write_meta
 from run_campaign import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
 
@@ -40,6 +41,15 @@ def main():
     parser.add_argument("--pio", default="pio")
     parser.add_argument("--out")
     parser.add_argument("--flash", action="store_true", help="reflash before running")
+    parser.add_argument("--power-port",
+                         help="PPK2 serial port (auto-detected if a PPK2 is attached)")
+    parser.add_argument("--power-voltage-mv", type=int, default=DEFAULT_VOLTAGE_MV,
+                         help="source-meter voltage; 5000 is the node's 5V header pin")
+    parser.add_argument("--power-mode", choices=["source", "ampere"], default="source",
+                         help="source: PPK2 powers the node from its 5V header pin. ampere: "
+                              "PPK2 sits in series with an externally powered rail")
+    parser.add_argument("--no-power", action="store_true",
+                         help="skip energy measurement even if a PPK2 is attached")
     args = parser.parse_args()
 
     ensure_pyserial(args.pio)
@@ -81,6 +91,13 @@ def main():
 
     with Device(gw_port, name="gw") as gateway, Device(node_port, name="node") as node:
         print(f"gateway {gateway.ping()}   node {node.ping()}")
+
+        # Started before the metadata is written so the record says whether energy was actually
+        # being captured, rather than whether it was asked for.
+        power = None if args.no_power else PowerMonitor.create(
+            port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
+            raw_dir=out_dir / "power_traces")
+
         write_meta(out_dir, {
             "started_at": started,
             "started_at_iso": datetime.now().isoformat(timespec="seconds"),
@@ -91,6 +108,8 @@ def main():
             "scheduled_points": len(schedule),
             "device_info": {"gateway": gateway.info(), "node": node.info()},
             "peer": gateway_peer,
+            "power": ({"mode": args.power_mode, "voltage_mv": args.power_voltage_mv,
+                        "measured_board": "node"} if power else None),
             "benchmark_git_sha": git_sha(REPO_ROOT),
             "connectionlib_git_sha": git_sha(REPO_ROOT / "ConnectionLib"),
             "configuration_space": {
@@ -100,7 +119,7 @@ def main():
         })
 
         runner = CampaignRunner(gateway, node, gateway_peer, node_peer, out_dir, writer,
-                                 out_dir / "status.json")
+                                 out_dir / "status.json", power=power)
 
         override = 10 if args.quick else None
         for run in schedule:
@@ -126,6 +145,9 @@ def main():
                 print(f"    INCOMPLETE {got}/{override or module.exchanges(run.point)}")
             runner.completed += 1
             runner._write_status(schedule)
+
+        if power:
+            power.stop()
 
     writer.close()
     print(f"\nfinished in {format_duration(time.time() - started)} -> {out_dir}")
