@@ -9,9 +9,11 @@ believed at all.
 """
 
 import argparse
+import json
 import statistics
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -41,6 +43,8 @@ def main():
     parser.add_argument("--zigbee-peer", default="0013A20042035B39")
     parser.add_argument("--pio", default="pio")
     parser.add_argument("--power-port")
+    parser.add_argument("--json", help="write the measured standing currents here, for the "
+                                        "above-idle analysis a --quick run cannot derive itself")
     parser.add_argument("--idle-seconds", type=float, default=6.0,
                          help="shorter than a campaign's hold; enough to compare standing currents")
     args = parser.parse_args()
@@ -119,6 +123,16 @@ def main():
                 print(f"  {FAIL}  {tech}: {exc}")
 
         power.stop()
+
+        if args.json:
+            # A --quick run carries no idle points, so idle_baselines() finds nothing and any
+            # above-idle figure is unavailable. Writing these out lets the analysis subtract a
+            # measured baseline instead of a remembered number.
+            out = {"voltage_mv": power.voltage_mv,
+                    "measured_at": datetime.now().isoformat(timespec="seconds"),
+                    "idle_ma": {k: v for k, v in measured.items() if v is not None}}
+            Path(args.json).write_text(json.dumps(out, indent=2) + "\n")
+            print(f"  {INFO}  wrote {args.json}")
 
         floor = measured.get("none")
         ok &= check("board floor is plausible", floor is not None and 1.0 < floor < 500.0,
