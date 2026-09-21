@@ -23,6 +23,7 @@ Everything here is optional. If the package is missing or no PPK2 is attached, `
 returns None and the campaign runs exactly as before, without energy columns.
 """
 
+import os
 import re
 import threading
 import time
@@ -89,6 +90,7 @@ class PowerMonitor:
                 if port is None:
                     return None
 
+            cls._recover_streaming(port)
             ppk2 = PPK2_API(port)
             ppk2.get_modifiers()
             if mode == "source":
@@ -142,13 +144,51 @@ class PowerMonitor:
         return ports[0]
 
     @staticmethod
+    def _recover_streaming(port, timeout_s=5.0):
+        """Quiet a PPK2 left mid-stream by a previous run, and drain its backlog.
+
+        `get_modifiers()` decodes the device's reply as UTF-8, so leftover sample bytes surface as
+        `UnicodeDecodeError: invalid start byte` — which points nowhere near the real cause. Any
+        run that ended without `stop()` leaves the device streaming, so this has to happen before
+        the handshake rather than as a special case in one tool.
+
+        One read is not enough: the buffer caps at ~4 kB while the device keeps sending, so drain
+        until the port stays quiet for three consecutive polls. Backlogs of 130–160 kB are normal
+        after a killed run.
+        """
+        try:
+            import serial
+            from ppk2_api.ppk2_api import PPK2_Command
+            with serial.Serial(port, timeout=0.1) as ser:
+                ser.write(bytes((PPK2_Command.AVERAGE_STOP,)))
+                ser.flush()
+                total, quiet, deadline = 0, 0, time.time() + timeout_s
+                while time.time() < deadline and quiet < 3:
+                    waiting = ser.in_waiting
+                    if waiting:
+                        total += len(ser.read(waiting))
+                        quiet = 0
+                    else:
+                        quiet += 1
+                    time.sleep(0.1)
+                return total
+        except Exception:                              # noqa: BLE001 - purely opportunistic
+            return 0
+
+    @staticmethod
     def _port_holder(port):
-        """Name the process holding `port`, by scanning /proc. Returns None if nothing does."""
+        """Name *another* process holding `port`, by scanning /proc. None if nothing does.
+
+        Skipping our own pid matters: by the time this runs from `create`'s error handler, PPK2_API
+        has already opened the port, so an unfiltered scan finds our own descriptor and reports the
+        caller as the culprit - which hides whatever actually failed.
+        """
         if not port:
             return None
+        own = str(os.getpid())
         try:
             for proc in Path("/proc").iterdir():
-                if not proc.name.isdigit():
+                if not proc.name.isdigit() or proc.name == own:
                     continue
                 try:
                     for link in (proc / "fd").iterdir():

@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench import technologies
 from bench.campaign import CampaignRunner, ScheduledRun
-from bench.device import Device, detect_ports, ensure_pyserial, flash, read_mac_for_port
+from bench.device import (Device, detect_ports, ensure_pyserial, flash, read_mac_for_port,
+                           wait_for_port)
 from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.results import ResultWriter, write_meta
 from run_campaign import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
@@ -64,13 +65,28 @@ def main():
         out_dir = REPO_ROOT / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # The PPK2 comes up before anything touches the boards. In source mode it *is* the node's
+    # supply, and the node's USB-serial chip runs off the board rail (its cable has VBUS cut), so
+    # until the rail is up the node has no serial port to detect, flash, or open. DUT power also
+    # drops the moment the session closes - verified by SIGKILLing a sole holder and watching the
+    # board's by-id entry vanish - so this one monitor has to span the entire run.
+    power = None if args.no_power else PowerMonitor.create(
+        port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
+        raw_dir=out_dir / "power_traces")
+    if power is None and not args.no_power and args.power_mode == "source":
+        sys.exit("source mode: the PPK2 is the node's only supply, but it would not start. "
+                 "Fix it, or pass --no-power if the node is powered some other way.")
+
     gw_port, node_port = args.gateway_port, args.node_port
     if not gw_port or not node_port:
-        detected = detect_ports(args.pio)
+        detected = detect_ports(args.pio, expect=2, timeout_s=20.0)
         if len(detected) != 2:
             sys.exit(f"expected exactly 2 serial devices, found {len(detected)}: {detected}")
         gw_port = gw_port or detected[0]
         node_port = node_port or detected[1]
+    for port in (gw_port, node_port):
+        if not wait_for_port(port):
+            sys.exit(f"{port} never appeared — is the PPK2 powering that board?")
 
     if args.flash:
         flash(args.pio, "bench_node", node_port)
@@ -92,12 +108,8 @@ def main():
     with Device(gw_port, name="gw") as gateway, Device(node_port, name="node") as node:
         print(f"gateway {gateway.ping()}   node {node.ping()}")
 
-        # Started before the metadata is written so the record says whether energy was actually
-        # being captured, rather than whether it was asked for.
-        power = None if args.no_power else PowerMonitor.create(
-            port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
-            raw_dir=out_dir / "power_traces")
-
+        # `power` was started above, before the boards were touched. The metadata below still
+        # records whether energy was actually being captured rather than whether it was asked for.
         write_meta(out_dir, {
             "started_at": started,
             "started_at_iso": datetime.now().isoformat(timespec="seconds"),

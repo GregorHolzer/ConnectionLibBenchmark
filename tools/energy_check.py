@@ -17,7 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bench import technologies
-from bench.device import Device, DeviceError, detect_ports, ensure_pyserial, read_mac_for_port
+from bench.device import (Device, DeviceError, detect_ports, ensure_pyserial, read_mac_for_port,
+                           wait_for_port)
 from bench.power import PowerMonitor
 from bench.records import parse_records
 
@@ -45,12 +46,23 @@ def main():
     args = parser.parse_args()
 
     ensure_pyserial(args.pio)
+
+    # Before the boards, not after: in source mode the PPK2 is the node's supply, and the node's
+    # USB-serial chip runs off the board rail, so the node has no serial port until the rail is up.
+    print("\n0. PPK2")
+    power = PowerMonitor.create(port=args.power_port, raw_dir=None)
+    if power is None:
+        print(f"  {INFO}  no PPK2 — if it is the node's only supply, nothing below can run")
+
     gw_port, node_port = args.gateway_port, args.node_port
     if not gw_port or not node_port:
-        detected = detect_ports(args.pio)
+        detected = detect_ports(args.pio, expect=2, timeout_s=20.0)
         if len(detected) != 2:
             sys.exit(f"expected 2 serial devices, found {detected}")
         gw_port, node_port = detected
+    for port in (gw_port, node_port):
+        if not wait_for_port(port):
+            sys.exit(f"{port} never appeared — is the PPK2 powering that board?")
 
     node_mac = read_mac_for_port(node_port, args.pio)
     gateway_mac = read_mac_for_port(gw_port, args.pio)
@@ -81,7 +93,6 @@ def main():
             ok &= check("IDLE returns a PPI record", False, str(exc))
 
         print("\n3. PPK2")
-        power = PowerMonitor.create(port=args.power_port, raw_dir=None)
         if power is None:
             print(f"  {INFO}  no PPK2 attached — wire it and re-run to get standing currents")
             print("\nboard checks passed" if ok else "\nSOME CHECKS FAILED")

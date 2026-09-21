@@ -4,6 +4,7 @@ The device speaks the line protocol described at the top of src/main.cpp. One fl
 an entire campaign: every hyperparameter, including the peer address, arrives in a CFG command.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -182,12 +183,41 @@ NON_BOARD_VIDS = {
 }
 
 
-def detect_ports(pio="pio"):
+def detect_ports(pio="pio", expect=None, timeout_s=0.0):
     """The real USB serial devices that could be benchmark boards.
 
     Ignores the virtual /dev/ttyS* that flood Linux, and anything whose vendor ID is known not to
     be a board (see NON_BOARD_VIDS).
+
+    `expect` + `timeout_s` poll until that many boards are present. Needed whenever the PPK2 is
+    source-metering a board: it *is* that board's supply, and the board's USB-serial chip runs off
+    the board rail (the cable has VBUS cut), so for a second or two after the rail comes up the
+    board has no serial port to find. A single scan in that window sees one board and fails.
     """
+    if expect is None:
+        return _scan_ports(pio)
+    deadline = time.time() + timeout_s
+    while True:
+        ports = _scan_ports(pio)
+        if len(ports) >= expect or time.time() >= deadline:
+            return ports
+        time.sleep(0.5)
+
+
+def wait_for_port(port, timeout_s=20.0):
+    """Block until `port` exists. Returns True if it showed up.
+
+    Needed even when ports are named explicitly: a board the PPK2 source-meters has no serial port
+    until the rail is up, and the CH9102 takes a second or two to enumerate after it is. Skipping
+    this makes the first esptool or serial open fail on a board that is merely still booting.
+    """
+    deadline = time.time() + timeout_s
+    while not os.path.exists(port) and time.time() < deadline:
+        time.sleep(0.25)
+    return os.path.exists(port)
+
+
+def _scan_ports(pio):
     result = subprocess.run([pio, "device", "list"], capture_output=True, text=True, check=True)
     ports, current = [], None
     for line in result.stdout.splitlines():

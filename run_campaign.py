@@ -32,7 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench import technologies
 from bench.campaign import PRESETS, CampaignRunner, allocate, build_schedule
-from bench.device import Device, detect_ports, ensure_pyserial, flash, read_mac_for_port
+from bench.device import (Device, detect_ports, ensure_pyserial, flash, read_mac_for_port,
+                           wait_for_port)
 from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.results import ResultWriter, write_meta
 
@@ -126,13 +127,27 @@ def main():
         out_dir = REPO_ROOT / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # The PPK2 comes up before anything touches the boards. In source mode it *is* the node's
+    # supply, and the node's USB-serial chip runs off the board rail (its cable has VBUS cut), so
+    # until the rail is up the node has no serial port to detect, flash, or open. DUT power also
+    # drops the moment the session closes, so this one monitor has to span the whole campaign.
+    power = None if args.no_power else PowerMonitor.create(
+        port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
+        raw_dir=out_dir / "power_traces")
+    if power is None and not args.no_power and args.power_mode == "source":
+        sys.exit("source mode: the PPK2 is the node's only supply, but it would not start. "
+                 "Fix it, or pass --no-power if the node is powered some other way.")
+
     gw_port, node_port = args.gateway_port, args.node_port
     if not gw_port or not node_port:
-        detected = detect_ports(args.pio)
+        detected = detect_ports(args.pio, expect=2, timeout_s=20.0)
         if len(detected) != 2:
             sys.exit(f"expected exactly 2 serial devices, found {len(detected)}: {detected}")
         gw_port = gw_port or detected[0]
         node_port = node_port or detected[1]
+    for port in (gw_port, node_port):
+        if not wait_for_port(port):
+            sys.exit(f"{port} never appeared — is the PPK2 powering that board?")
     print(f"\ngateway {gw_port}\nnode    {node_port}")
 
     # Two flashes for the entire campaign. Everything after this is runtime configuration.
@@ -157,12 +172,8 @@ def main():
         print(f"gateway says: {gateway.ping()}   node says: {node.ping()}")
         device_info = {"gateway": gateway.info(), "node": node.info()}
 
-        # Started before the metadata is written so the record says whether energy was actually
-        # being captured, rather than whether it was asked for.
-        power = None if args.no_power else PowerMonitor.create(
-            port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
-            raw_dir=out_dir / "power_traces")
-
+        # `power` was started above, before the boards were touched. The metadata below still
+        # records whether energy was actually being captured rather than whether it was asked for.
         write_meta(out_dir, {
             "started_at": time.time(),
             "started_at_iso": datetime.now().isoformat(timespec="seconds"),
