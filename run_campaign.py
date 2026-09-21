@@ -98,6 +98,10 @@ def main():
                               "(e.g. a pre-strip run, to show the strip changed only power)")
     args = parser.parse_args()
 
+    # Before any output: this may re-exec under PlatformIO's interpreter, and on a terminal
+    # (line-buffered) anything already printed would then appear twice.
+    ensure_pyserial(args.pio)
+
     # "Forever" is a very large budget rather than an unbounded loop, so the schedule is still
     # built once, up front, by the same repetition-major allocator. That keeps the rotation
     # structure, the point-order rotation and --resume identical to a fixed-budget campaign;
@@ -131,8 +135,6 @@ def main():
         for run in schedule[:12]:
             print(f"  #{run.index:<4} rot={run.rotation}  {run.point.key}")
         return 0
-
-    ensure_pyserial(args.pio)
 
     out_dir = Path(args.resume) if args.resume else Path(
         args.out or REPO_ROOT / "results" / f"campaign-{datetime.now():%Y%m%d-%H%M%S}")

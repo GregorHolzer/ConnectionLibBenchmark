@@ -249,24 +249,38 @@ def read_mac_for_port(port, pio="pio"):
 
 
 def ensure_pyserial(pio):
-    """Re-exec under PlatformIO's own interpreter if this one lacks pyserial.
+    """Re-exec under PlatformIO's own interpreter if this one lacks pyserial or ppk2-api.
 
     Debian's and Arch's system Pythons are both EXTERNALLY-MANAGED with no usable pip, but
     PlatformIO's venv always has pyserial as a hard dependency.
-    """
-    try:
-        import serial  # noqa: F401
-        return
-    except ImportError:
-        pass
 
-    import os
+    `ppk2_api` is checked for the same reason even though energy measurement is optional. The
+    system Python here *does* have pyserial and *does not* have ppk2-api, so the old check passed
+    and `./run_campaign.py` then ran with no energy at all - while the same command under the
+    PlatformIO venv measured normally. In source mode that difference is fatal rather than merely
+    quiet, because the PPK2 is the node's only supply.
+    """
+    missing = [name for name in ("serial", "ppk2_api") if not _importable(name)]
+    if not missing:
+        return
+
     if os.environ.get("_BENCH_REEXECED"):
-        sys.exit(f"pyserial still missing after re-exec; install it for {sys.executable}")
+        if "serial" in missing:
+            sys.exit(f"pyserial still missing after re-exec; install it for {sys.executable}")
+        # Only ppk2-api absent after re-exec: genuinely optional, and PowerMonitor.create says so.
+        return
     pio_bin = Path(shutil.which(pio) or pio).resolve()
     for name in ("python3", "python"):
         candidate = pio_bin.parent / name
         if candidate.exists():
             os.environ["_BENCH_REEXECED"] = "1"
             os.execv(str(candidate), [str(candidate), str(Path(sys.argv[0]).resolve())] + sys.argv[1:])
-    sys.exit(f"pyserial not available and no interpreter found next to {pio_bin}")
+    sys.exit(f"{', '.join(missing)} not available and no interpreter found next to {pio_bin}")
+
+
+def _importable(name):
+    try:
+        __import__(name)
+        return True
+    except ImportError:
+        return False
