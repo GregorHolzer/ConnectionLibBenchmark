@@ -179,11 +179,24 @@ def build_schedule(plan, techs):
     return schedule
 
 
+# Settle time after switching to a different technology, before the energy window opens. CFG
+# returns as soon as the firmware acknowledges it, which is before the radio has reached its
+# steady state: measured on the bench, the first ESP-NOW point after another technology read
+# 85.4 mA against an ESP-NOW idle of 117.8 mA - below its own idle, which is impossible while
+# transmitting - and the point after it was still 12 % low. LoRa and Zigbee settle within the
+# CFG round trip and show no such ramp.
+#
+# Charged only on a *change* of technology, not on every CFG: consecutive points within one
+# technology's block rebuild the Transport too, and those showed no warm-up. That keeps the cost
+# at a few seconds per rotation rather than per point.
+SETTLE_SECONDS = 3.0
+
+
 class CampaignRunner:
     """Executes a schedule against the two boards, streaming results to disk as it goes."""
 
     def __init__(self, gateway, node, gateway_peer, node_peer, out_dir, writer, status_path,
-                 log=print, power=None):
+                 log=print, power=None, settle_s=SETTLE_SECONDS):
         self.gateway = gateway
         self.node = node
         # Optional PPK2. None means the campaign runs exactly as before, without energy columns.
@@ -198,11 +211,23 @@ class CampaignRunner:
         self.status_path = status_path
         self.log = log
         self.airtime = AirtimeBudget()
+        self.settle_s = settle_s
+        self._last_tech = None
         self.completed = 0
         self.failures = []
         self.started_at = time.time()
         self.recent = deque(maxlen=8)
         self.duty_wait_total_s = 0.0
+
+    def _settle(self, tech):
+        """Let a newly-selected radio reach steady state before any window opens.
+
+        Includes the very first point of a run, when `_last_tech` is still None: that is the
+        coldest the radio ever is, and it is the case the warm-up was first measured on.
+        """
+        if self.settle_s and tech != self._last_tech:
+            time.sleep(self.settle_s)
+        self._last_tech = tech
 
     def _write_status(self, schedule, current=None):
         elapsed = time.time() - self.started_at
@@ -250,6 +275,7 @@ class CampaignRunner:
 
         self.node.configure(node_params)
         self.gateway.configure(params)
+        self._settle(tech)
 
         started_at = time.time()
         duration_ms = technologies.IDLE_SECONDS * 1000
@@ -294,6 +320,7 @@ class CampaignRunner:
         node_params.pop("n", None)   # the node serves continuously; it has no exchange count
         self.node.configure(node_params)
         header = self.gateway.configure(params)
+        self._settle(run.tech)
 
         started_at = time.time()
         timeout = module.estimated_seconds(run.point) * 3 + 60

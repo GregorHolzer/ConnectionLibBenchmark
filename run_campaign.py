@@ -69,6 +69,10 @@ def main():
     parser.add_argument("--preset", choices=sorted(PRESETS), default="standard")
     parser.add_argument("--budget-hours", type=float,
                          help="override the preset's wall-clock budget")
+    parser.add_argument("--forever", action="store_true",
+                         help="keep rotating until Ctrl-C. Every rotation is a complete pass over "
+                              "all three technologies, so stopping at any point leaves a balanced "
+                              "dataset - more repetitions, never partial coverage")
     parser.add_argument("--techs", nargs="+", default=technologies.ALL, choices=technologies.ALL)
     parser.add_argument("--gateway-port")
     parser.add_argument("--node-port")
@@ -94,10 +98,19 @@ def main():
                               "(e.g. a pre-strip run, to show the strip changed only power)")
     args = parser.parse_args()
 
-    budget_hours = args.budget_hours or PRESETS[args.preset]
+    # "Forever" is a very large budget rather than an unbounded loop, so the schedule is still
+    # built once, up front, by the same repetition-major allocator. That keeps the rotation
+    # structure, the point-order rotation and --resume identical to a fixed-budget campaign;
+    # only the stopping condition changes, from exhausting the schedule to Ctrl-C.
+    FOREVER_HOURS = 24 * 30.0
+    budget_hours = FOREVER_HOURS if args.forever else (args.budget_hours or PRESETS[args.preset])
     plan = allocate(budget_hours, args.techs)
 
-    print(f"budget: {budget_hours:.1f} h across {', '.join(args.techs)}")
+    if args.forever:
+        print(f"running until Ctrl-C across {', '.join(args.techs)} "
+              f"(schedule built for {budget_hours / 24:.0f} days; stop whenever)")
+    else:
+        print(f"budget: {budget_hours:.1f} h across {', '.join(args.techs)}")
     total_estimate = 0.0
     for tech in args.techs:
         entry = plan[tech]
@@ -202,8 +215,11 @@ def main():
         runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
                                  out_dir / "status.json", power=power)
         started = time.time()
+        interrupted = False
 
         for run in schedule:
+            if interrupted:
+                break
             if run.index in already_done:
                 runner.completed += 1
                 continue
@@ -219,6 +235,13 @@ def main():
 
             try:
                 ok, exchanges, summary = runner.run_one(run)
+            except KeyboardInterrupt:
+                # The point in flight is abandoned rather than recorded: it was cut mid-exchange,
+                # so its energy window and its exchange count are both short. --resume will
+                # re-run it, because only completed points are written to points.jsonl.
+                print("\n    interrupted mid-point — discarding it, stopping cleanly")
+                interrupted = True
+                break
             except Exception as exc:                     # noqa: BLE001 - a ten-hour run must not
                 print(f"    FAILED: {exc}")              # die because one point misbehaved
                 runner.failures.append({"index": run.index, "point": run.point.key,
@@ -240,7 +263,14 @@ def main():
                 print(f"    INCOMPLETE {got}/{module.exchanges(run.point)}")
 
             runner.completed += 1
-            runner._write_status(schedule)
+            try:
+                runner._write_status(schedule)
+            except KeyboardInterrupt:
+                # Ctrl-C between points: the point just finished is already flushed to disk, so
+                # there is nothing to discard.
+                print("\n  interrupted — stopping cleanly")
+                interrupted = True
+                break
 
         runner._write_status(schedule)
         if power:
@@ -256,17 +286,25 @@ def main():
     if power:
         meta["power_samples_total"] = power.total_samples
     meta["duty_wait_total_s"] = round(runner.duty_wait_total_s, 1)
+    meta["interrupted"] = interrupted
     write_meta(out_dir, meta)
 
-    print(f"\ncampaign finished in {format_duration(meta['elapsed_s'])}")
+    verb = "stopped after" if interrupted else "finished in"
+    print(f"\ncampaign {verb} {format_duration(meta['elapsed_s'])}")
     print(f"  results: {out_dir}")
+    print(f"  {runner.completed} of {len(schedule)} points recorded")
     print(f"  LoRa airtime: {runner.airtime.total_s:.0f}s total, "
           f"{runner.duty_wait_total_s:.0f}s spent waiting on the duty cycle")
     if runner.failures:
         print(f"  {len(runner.failures)} point(s) failed or were incomplete")
-    print(f"\nnext:\n  ./verify_practices.py --results {out_dir}"
+    if interrupted:
+        # Repetition-major order means whatever was reached is a balanced prefix: every rotation
+        # is a complete pass over all three technologies, so stopping early costs repetitions
+        # rather than coverage.
+        print(f"\nresume where this left off:\n  ./run_campaign.py --resume {out_dir}")
+    print(f"\nanalyse what you have:\n  ./verify_practices.py --results {out_dir}"
           f"\n  ./plot_results.py --results {out_dir}")
-    return 1 if runner.failures else 0
+    return 130 if interrupted else (1 if runner.failures else 0)
 
 
 if __name__ == "__main__":
