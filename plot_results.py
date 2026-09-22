@@ -20,105 +20,21 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-matplotlib.use("Agg")   # headless: the Pi has no display
+# bench.plotting first: it selects the headless Agg backend, which has to happen before pyplot
+# is imported anywhere.
+from bench.plotting import (COLOR, FACTOR_LABEL, GRID, INK, INK_2, LABEL, MARKER, SURFACE,
+                             TECH_ORDER, lighten, ms_formatter, overlay_medians, save, style_axes,
+                             wrap)
+
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from bench.analysis import describe, linear_regression
+from bench.analysis import describe, idle_baselines, linear_regression, point_energy
 from bench.results import load_meta, load_points, load_raw
 
 REPO_ROOT = Path(__file__).resolve().parent
-
-# Slots 1-3 of the validated reference categorical palette; the documented set that clears the
-# all-pairs CVD and normal-vision floors on this surface (worst CVD ΔE 9.2, normal-vision 24.0).
-# Colour follows the technology's identity, never its rank, so omitting one never repaints another.
-SURFACE = "#fcfcfb"
-INK = "#0b0b0b"
-INK_2 = "#52514e"
-GRID = "#e3e3df"
-
-TECH_ORDER = ["espnow", "lora", "zigbee"]
-COLOR = {"espnow": "#2a78d6", "lora": "#eb6834", "zigbee": "#1baf7a"}
-MARKER = {"espnow": "o", "lora": "s", "zigbee": "^"}
-LABEL = {"espnow": "ESP-NOW", "lora": "LoRa", "zigbee": "Zigbee"}
-
-FACTOR_LABEL = {
-    "sf": "spreading factor", "bw": "bandwidth (kHz)", "cr": "coding rate (4/N)",
-    "pwr": "transmit power (dBm)", "preamble": "preamble symbols", "payload": "payload (bytes)",
-    "channel": "WiFi channel", "encrypt": "encryption", "timeout": "send timeout (ms)",
-    "broadcast": "broadcast addressing",
-}
-
-
-def wrap(text, width):
-    words, lines, current = text.split(), [], ""
-    for word in words:
-        if len(current) + len(word) + 1 > width:
-            lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}".strip()
-    if current:
-        lines.append(current)
-    return lines
-
-
-def style_axes(ax, xlabel, ylabel, title, subtitle=None):
-    ax.set_facecolor(SURFACE)
-    ax.grid(True, axis="y", color=GRID, linewidth=0.8)
-    ax.set_axisbelow(True)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(GRID)
-    ax.tick_params(colors=INK_2, labelsize=9, length=3, color=GRID)
-    ax.set_xlabel(xlabel, color=INK_2, fontsize=10)
-    ax.set_ylabel(ylabel, color=INK_2, fontsize=10)
-    sub_lines = wrap(subtitle, 84) if subtitle else []
-    if title:
-        ax.set_title(title, color=INK, fontsize=12, loc="left", pad=10 + 12 * len(sub_lines))
-    if sub_lines:
-        ax.text(0.0, 1.015, "\n".join(sub_lines), transform=ax.transAxes, color=INK_2,
-                 fontsize=8.5, va="bottom", ha="left", linespacing=1.4)
-
-
-def lighten(hex_color, t):
-    src = [int(hex_color[i:i + 2], 16) for i in (1, 3, 5)]
-    dst = [int(SURFACE[i:i + 2], 16) for i in (1, 3, 5)]
-    return "#" + "".join(f"{round(c + (s - c) * t):02x}" for c, s in zip(src, dst))
-
-
-def save(fig, out_dir, name):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for ext in ("png", "pdf"):
-        fig.savefig(out_dir / f"{name}.{ext}", dpi=200, bbox_inches="tight", facecolor=SURFACE)
-    plt.close(fig)
-    print(f"  {name}.png / .pdf")
-
-
-def overlay_medians(ax, data, positions, color):
-    """Always-visible median marker per group.
-
-    A violin and a box both encode spread as *size*, so a near-deterministic distribution -
-    LoRa's time-on-air is repeatable to well under a millisecond - collapses to a sub-pixel
-    sliver and the figure reads as empty. The marker is drawn in axis-independent point units,
-    so it survives a log axis spanning two decades while still sitting inside the box wherever
-    there is genuine spread to show.
-    """
-    for position, values in zip(positions, data):
-        if not values:
-            continue
-        ordered = sorted(values)
-        median = ordered[len(ordered) // 2]
-        ax.plot([position], [median], marker="o", markersize=5, markerfacecolor=color,
-                 markeredgecolor=SURFACE, markeredgewidth=1.1, linestyle="none", zorder=6)
-
-def ms_formatter(value, _):
-    return f"{value:g}"
 
 
 # ------------------------------------------------------------------------------------------
@@ -416,8 +332,6 @@ def plot_standing_current(points, out_dir):
     The board floor is drawn as a reference line so the radio's own share is visible rather than
     buried in the ESP32's draw.
     """
-    from bench.analysis import idle_baselines
-
     baselines = idle_baselines(points)
     if not baselines:
         return
@@ -466,8 +380,6 @@ def plot_standing_current(points, out_dir):
 
 def plot_energy_per_delivered(points, out_dir):
     """Energy per delivered payload, absolute and above idle, per technology."""
-    from bench.analysis import idle_baselines, point_energy
-
     baselines = idle_baselines(points)
     absolute, excess = defaultdict(list), defaultdict(list)
     for point in points:

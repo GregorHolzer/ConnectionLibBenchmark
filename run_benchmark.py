@@ -24,7 +24,7 @@ from bench.device import (Device, detect_ports, ensure_pyserial, flash, read_mac
                            wait_for_port)
 from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.results import ResultWriter, write_meta
-from run_campaign import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
+from bench.util import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
 
 REPO_ROOT = Path(__file__).resolve().parent
 

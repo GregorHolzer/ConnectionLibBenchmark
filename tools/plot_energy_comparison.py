@@ -31,15 +31,12 @@ import statistics
 import sys
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from plot_results import COLOR, GRID, INK, INK_2, LABEL, SURFACE, TECH_ORDER, save, style_axes
+# bench.plotting selects the headless Agg backend, so it has to be imported before pyplot.
+from bench.plotting import COLOR, GRID, INK, INK_2, LABEL, SURFACE, TECH_ORDER, save, style_axes
+
+import matplotlib.pyplot as plt
 
 # A settled point sits within this fraction of its technology's median draw. 5 % clears the
 # spread actually seen within a settled technology (Zigbee 0.5 %, LoRa 3.1 %) while catching the

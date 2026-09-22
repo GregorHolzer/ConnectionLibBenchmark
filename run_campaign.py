@@ -22,7 +22,6 @@ Two design points worth knowing before changing anything here:
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -36,31 +35,9 @@ from bench.device import (Device, detect_ports, ensure_pyserial, flash, read_mac
                            wait_for_port)
 from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.results import ResultWriter, write_meta
+from bench.util import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
 
 REPO_ROOT = Path(__file__).resolve().parent
-
-# The bench's XBee node module (see ConnectionLib docs/hardware.md). There is no host-side way to
-# read an XBee's address without talking to the module, so unlike the ESP-NOW MAC - which esptool
-# reads straight off the ROM loader - this one is supplied. Swap the boards and every Zigbee
-# send() will time out; pass --zigbee-peer to correct it.
-DEFAULT_ZIGBEE_PEER = "0013A20042035B39"
-
-
-def git_sha(path):
-    try:
-        return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
-                               capture_output=True, text=True, check=True).stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-
-
-def format_duration(seconds):
-    if seconds is None:
-        return "?"
-    seconds = int(seconds)
-    hours, remainder = divmod(seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{secs:02d}s"
 
 
 def main():

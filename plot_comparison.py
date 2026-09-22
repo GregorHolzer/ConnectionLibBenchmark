@@ -19,26 +19,25 @@ Written for print, light mode only, PNG and vector PDF, like the rest of the sui
 """
 
 import argparse
-import math
 import sys
 import textwrap
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")   # headless
-import matplotlib.pyplot as plt
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# The palette, the axis styling and the bar helpers are shared with the per-technology figures on
+# purpose: the two scripts must produce one visual system, and a technology must keep its colour
+# across every figure in the thesis. bench.plotting also selects the headless Agg backend, which
+# has to happen before pyplot is imported anywhere.
+from bench.plotting import (COLOR, INK, INK_2, LABEL, SURFACE, TECH_ORDER, apply_floor, bars,
+                             lighten, panel_note, save, style_axes)
+
+import matplotlib.pyplot as plt
 
 from bench.comparison import (aggregate, board_floor_ua, flat_factors, select_best,
                                stack_pairs, standing_currents)
 from bench.results import load_meta, load_node_rx, load_points, load_raw
-# The palette, the axis styling and the always-visible median marker are shared with the
-# per-technology figures on purpose: the two scripts must produce one visual system, and a
-# technology must keep its colour across every figure in the thesis.
-from plot_results import COLOR, INK, INK_2, LABEL, SURFACE, TECH_ORDER, lighten, save, style_axes
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -49,68 +48,6 @@ BENCH_CAVEAT = ("Bench measurement, two boards at desk range - not a forest resu
 
 VOLTAGE_V = 5.0          # the PPK2 source voltage the campaign ran at
 SECONDS_PER_DAY = 86400
-
-
-# ------------------------------------------------------------------------------------------
-# Axis discipline
-# ------------------------------------------------------------------------------------------
-
-def apply_floor(ax, values, log=False, headroom=1.30):
-    """Force the axis to start at zero, or at a decade when the data spans orders of magnitude.
-
-    One helper for every panel so the rule cannot drift between them. Matplotlib's autoscaling
-    would happily start a bar axis at 95 mA and turn a 0.3 % difference into a visual landslide.
-    """
-    finite = [v for v in values if v is not None and math.isfinite(v)]
-    if not finite:
-        return
-    if log:
-        positive = [v for v in finite if v > 0]
-        if not positive:
-            return
-        ax.set_yscale("log")
-        low = 10 ** math.floor(math.log10(min(positive)))
-        high = 10 ** math.ceil(math.log10(max(positive)))
-        ax.set_ylim(low, high)
-    else:
-        ax.set_ylim(0, max(finite) * headroom)
-
-
-def bars(ax, techs, values, *, log=False, fmt="{:.1f}", unit="", headroom=1.30):
-    """One bar per technology with its value printed inside it.
-
-    Inside, not above: two technologies landing within a percent of each other - which happens on
-    delivery ratio and on framing efficiency - put their labels on top of one another otherwise.
-    """
-    drawn = [(i, t, v) for i, (t, v) in enumerate(zip(techs, values))
-             if v is not None and math.isfinite(v)]
-    for i, tech, value in drawn:
-        ax.bar(i, value, color=COLOR[tech], width=0.58, zorder=3)
-    apply_floor(ax, [v for _, _, v in drawn], log=log, headroom=headroom)
-
-    for i, tech, value in drawn:
-        ax.text(i, value, fmt.format(value) + unit, ha="center", va="top", color=SURFACE,
-                 fontsize=8.5, fontweight="bold", zorder=6,
-                 bbox=dict(boxstyle="round,pad=0.22", facecolor=COLOR[tech], edgecolor="none"))
-    # A technology with no value for this metric is named and left blank rather than dropped, so
-    # the reader sees that the metric does not exist for it instead of silently missing a bar.
-    for i, (tech, value) in enumerate(zip(techs, values)):
-        if value is None or not math.isfinite(value):
-            ax.text(i, 0, "  n/a  ", ha="center", va="bottom", color=INK_2, fontsize=8.5,
-                     style="italic")
-    ax.set_xticks(range(len(techs)))
-    ax.set_xticklabels([LABEL[t] for t in techs], fontsize=9)
-
-
-def panel_note(ax, text, width=52):
-    """A caveat pinned under the panel, for metrics that mislead without one.
-
-    Wrapped here rather than by hand-placed newlines in the caller: a note written to look right
-    at one figure width runs into the neighbouring panel at any other, and these panels sit four
-    to a row with very little gutter between them.
-    """
-    ax.text(0.0, -0.30, textwrap.fill(" ".join(text.split()), width), transform=ax.transAxes,
-             color=INK_2, fontsize=7.4, va="top", ha="left", linespacing=1.35, style="italic")
 
 
 # ------------------------------------------------------------------------------------------
