@@ -44,6 +44,36 @@ class Point:
         return f"{self.tech}/{self.factor}/{self.level}"
 
 
+# Payload sizes every technology can carry. Zigbee's 84-byte unfragmented limit binds the common
+# range (docs/metrics.md), and staying inside it is what makes the raw arm comparable across all
+# three rather than three separate measurements.
+COMMON_PAYLOADS = [8, 16, 32, 84]
+
+
+def raw_stack_points(tech, baseline, payloads=None):
+    """The no-library arm: the same exchange, driven straight onto the vendor API.
+
+    The exposé asks for results that keep what the library contributes separable from what the
+    radios contribute, and nothing measured that. These points are the other half of that
+    subtraction - identical in every respect to their library counterparts except for `stack=raw`,
+    which makes the firmware build a RawTransport instead of a ConnectionLib backend.
+
+    Swept across payload rather than taken at one size because the library's cost is not constant
+    in relative terms: ConnectionLib's 6-byte LoRa header costs a near-fixed +28.7 ms of airtime at
+    the SF9 baseline, which is 14.5 % of an 8-byte exchange but only 4.2 % of an 84-byte one. A
+    single size would report whichever of those happened to be measured.
+    """
+    out = []
+    for payload in payloads or COMMON_PAYLOADS:
+        params = dict(baseline)
+        params["payload"] = payload
+        params["stack"] = "raw"
+        # The level carries the payload because all of these share a factor; without it they would
+        # collapse onto one point_key and the sweep would be invisible to the analysis.
+        out.append(Point(tech, "stack", f"raw+payload={payload}", params))
+    return out
+
+
 from . import espnow, lora, zigbee   # noqa: E402
 
 REGISTRY = {"lora": lora, "espnow": espnow, "zigbee": zigbee}

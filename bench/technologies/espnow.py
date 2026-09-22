@@ -13,7 +13,7 @@ gets a channel, an encryption flag and a timeout. The sparse sweep is the honest
 
 import itertools
 
-from . import Point
+from . import Point, raw_stack_points
 
 NAME = "espnow"
 
@@ -58,6 +58,7 @@ def points():
             params = dict(BASELINE)
             params[factor] = level
             out.append(Point(NAME, factor, level, params))
+    out.extend(raw_stack_points(NAME, BASELINE))
     return out
 
 

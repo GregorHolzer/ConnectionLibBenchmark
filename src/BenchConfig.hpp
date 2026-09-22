@@ -8,6 +8,15 @@
 // are absent in any given command, and defaults-plus-overwrite is the simplest thing that works.
 namespace bench {
 
+// Which software stack carries the exchange. The comparison this enables is the exposé's step 6:
+// keeping what the library contributes separable from what the radios contribute. Raw transports
+// implement the same Transport interface, so the measured loop, the timing points and the emitted
+// records are identical between the two arms - only send()/poll() differ.
+enum class Stack : uint8_t {
+    Library,   // through ConnectionLib
+    Raw,       // straight onto RadioLib / esp_now.h / xbee-arduino
+};
+
 enum class Tech : uint8_t {
     None,   // null measurement: the harness with no radio, for the overhead figure (practice P4)
     EspNow,
@@ -17,6 +26,14 @@ enum class Tech : uint8_t {
 
 struct BenchConfig {
     Tech tech = Tech::None;
+    Stack stack = Stack::Library;
+
+    // Off by default, and that default is load-bearing: capturing signal quality costs a
+    // promiscuous-mode sniffer on ESP-NOW and a UART round trip per packet on Zigbee, both of
+    // which move the energy and latency numbers. Leaving it off keeps every campaign comparable
+    // with those recorded before this existed. LoRa is unaffected either way - RadioLib reads
+    // RSSI and SNR out of the chip for a packet that already arrived, at no cost.
+    bool captureRssi = false;
 
     // Shared across technologies
     uint16_t payloadBytes = 32;

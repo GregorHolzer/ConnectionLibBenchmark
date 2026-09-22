@@ -36,10 +36,12 @@
 #include "BenchConfig.hpp"
 #include "BenchRunner.hpp"
 #include "Conformance.hpp"
+#include "raw/RawTransports.hpp"
 
 using namespace connectionlib;
 using bench::BenchConfig;
 using bench::Tech;
+using bench::Stack;
 
 #if defined(BENCH_ROLE_GATEWAY)
 static const char *kRole = "gateway";
@@ -143,6 +145,8 @@ void applyKeyValue(BenchConfig &config, const char *key, const char *value) {
         else if (strcmp(value, "zigbee") == 0) config.tech = Tech::Zigbee;
         else config.tech = Tech::None;
     }
+    else if (matchKey("stack")) config.stack = (strcmp(value, "raw") == 0) ? Stack::Raw : Stack::Library;
+    else if (matchKey("rssi")) config.captureRssi = (atoi(value) != 0);
     else if (matchKey("payload")) config.payloadBytes = atoi(value);
     else if (matchKey("n")) config.exchanges = strtoul(value, nullptr, 10);
     else if (matchKey("spacing")) config.spacingMs = strtoul(value, nullptr, 10);
@@ -166,6 +170,13 @@ void applyKeyValue(BenchConfig &config, const char *key, const char *value) {
 // ---------------------------------------------------------------------------------------------
 
 std::unique_ptr<Transport> buildTransport(const BenchConfig &config) {
+    // The raw arm short-circuits before any ConnectionLib backend is constructed. Everything
+    // downstream - runGatewayPoint, the timing points, the emitted records - is unchanged, which
+    // is what makes the library-versus-raw difference attributable to the library itself.
+    if (config.stack == Stack::Raw) {
+        return createRawTransport(config);
+    }
+
     switch (config.tech) {
         case Tech::EspNow: {
             EspNowConfig cfg;
@@ -175,6 +186,7 @@ std::unique_ptr<Transport> buildTransport(const BenchConfig &config) {
             cfg.wifiChannel = config.wifiChannel;
             cfg.encrypt = config.encrypt;
             cfg.sendTimeoutMs = config.sendTimeoutMs;
+            cfg.captureRssi = config.captureRssi;
             return std::make_unique<EspNowTransport>(cfg);
         }
         case Tech::LoRa: {
@@ -192,8 +204,11 @@ std::unique_ptr<Transport> buildTransport(const BenchConfig &config) {
 #endif
             return std::make_unique<LoRaTransport>(cfg);
         }
-        case Tech::Zigbee:
-            return std::make_unique<ZigbeeTransport>(ZigbeeConfig{});
+        case Tech::Zigbee: {
+            ZigbeeConfig cfg;
+            cfg.captureRssi = config.captureRssi;
+            return std::make_unique<ZigbeeTransport>(cfg);
+        }
         case Tech::None:
             return nullptr;
     }
@@ -246,6 +261,10 @@ const char *techName(Tech tech) {
 void emitRunHeader() {
     Serial.printf("PPH,technology,%s\n", techName(g_config.tech));
     Serial.printf("PPH,role,%s\n", kRole);
+    // Recorded per point, not just per campaign: a rotation interleaves the two stacks, so the
+    // header is the only place that says which one produced the records that follow.
+    Serial.printf("PPH,stack,%s\n", g_config.stack == Stack::Raw ? "raw" : "lib");
+    Serial.printf("PPH,rssiCapture,%d\n", g_config.captureRssi ? 1 : 0);
     Serial.printf("PPH,payloadBytes,%u\n", g_config.payloadBytes);
     Serial.printf("PPH,exchanges,%lu\n", static_cast<unsigned long>(g_config.exchanges));
     Serial.printf("PPH,spacingMs,%lu\n", static_cast<unsigned long>(g_config.spacingMs));
@@ -450,6 +469,124 @@ void handleIdle(char *args) {
     showStatus("idle done");
 }
 
+// T-Beam v1.1 SX1278 pinout, mirroring ConnectionLib's LoRaPinConfig defaults. Duplicated rather
+// than imported because RFCHECK deliberately owns the radio itself, with no library in the path.
+constexpr int kLoRaSck = 5, kLoRaMiso = 19, kLoRaMosi = 27;
+constexpr int kLoRaNss = 18, kLoRaReset = 23, kLoRaDio0 = 26;
+
+/**
+ * @brief `RFCHECK` - measure the 433 MHz noise floor, then key the PA.
+ *
+ * Exists because "the received signal is weak" is not a claim anyone should accept from a packet
+ * RSSI alone. A packet RSSI is only meaningful against the noise floor it sits on: -119 dBm is a
+ * dead link if the floor is -121, and a perfectly healthy one if the floor is -150. RadioLib can
+ * report the instantaneous RSSI with no packet involved, which is exactly that floor.
+ *
+ * The transmit half is for the PPK2: keying the PA should show as a step of roughly 100 mA on the
+ * supply. If the current does not move, the radio is not transmitting at all, and no amount of
+ * antenna is going to help.
+ *
+ * LoRa only - the other two radios expose neither quantity.
+ */
+bool g_rfCheckUseRfo = false;
+
+void handleRfCheck() {
+    // Drives the SX1278 directly rather than reaching inside a Transport: the diagnostic has to
+    // work regardless of which stack is loaded, and the radio is a shared resource, so whatever
+    // holds it is torn down first.
+    g_transport.reset();
+    g_configured = false;
+
+    SPIClass spi(HSPI);
+    spi.begin(kLoRaSck, kLoRaMiso, kLoRaMosi, kLoRaNss);
+    // SX127x::getMod() is protected, and reading the PA registers is the whole point of this
+    // diagnostic, so a one-line subclass opens the door rather than patching the library.
+    struct ProbeRadio : SX1278 {
+        using SX1278::SX1278;
+        Module *mod() { return getMod(); }
+    };
+    ProbeRadio radio(new Module(kLoRaNss, kLoRaDio0, kLoRaReset, RADIOLIB_NC, spi));
+
+    int16_t begun = radio.begin(g_config.frequencyMHz, g_config.bandwidthKHz,
+                                 g_config.spreadingFactor, g_config.codingRate,
+                                 RADIOLIB_SX127X_SYNC_WORD, g_config.txPowerDbm,
+                                 g_config.preambleLength);
+    if (begun != RADIOLIB_ERR_NONE) {
+        // A chip-not-found here means the radio's rail is down or SPI is miswired - which is a far
+        // more useful answer than any RSSI number would have been.
+        Serial.printf("ERR,RFCHECK radio.begin failed (%d)\n", static_cast<int>(begun));
+        return;
+    }
+    radio.startReceive();
+    Serial.printf("RF,config,%.3f,%.0f,%u,%u,%d\n", static_cast<double>(g_config.frequencyMHz),
+                   static_cast<double>(g_config.bandwidthKHz), g_config.spreadingFactor,
+                   g_config.codingRate, g_config.txPowerDbm);
+
+    // Read the transmit chain straight out of the chip. Everything upstream reports success - the
+    // modem times packets to the microsecond - yet the supply shows no PA draw at all, so the
+    // question is what the registers actually contain rather than what the API claims.
+    //   PA_CONFIG (0x09): bit 7 = PaSelect (1 = PA_BOOST, 0 = RFO), bits 3:0 = OutputPower
+    //   PA_DAC    (0x4D): 0x07 = +20 dBm boost enabled, 0x04 = normal
+    //   OCP       (0x0B): bit 5 = OcpOn, bits 4:0 = OcpTrim - an over-current trim set too low
+    //                     throttles the PA to almost nothing, which looks exactly like this
+    uint8_t paConfig = radio.mod()->SPIreadRegister(RADIOLIB_SX127X_REG_PA_CONFIG);
+    uint8_t paDac = radio.mod()->SPIreadRegister(RADIOLIB_SX1278_REG_PA_DAC);
+    uint8_t ocp = radio.mod()->SPIreadRegister(RADIOLIB_SX127X_REG_OCP);
+    Serial.printf("RF,pa_config,0x%02X,paselect,%s,outputpower,%u\n", paConfig,
+                   (paConfig & 0x80) ? "PA_BOOST" : "RFO", static_cast<unsigned>(paConfig & 0x0F));
+    Serial.printf("RF,pa_dac,0x%02X\n", paDac);
+    Serial.printf("RF,ocp,0x%02X,on,%d,trim_ma,%u\n", ocp, (ocp & 0x20) ? 1 : 0,
+                   static_cast<unsigned>((ocp & 0x1F) <= 15 ? 45 + 5 * (ocp & 0x1F)
+                                                             : 130 + 10 * ((ocp & 0x1F) - 15)));
+
+    // Noise floor: instantaneous RSSI, no packet. Sampled repeatedly because a single reading
+    // catches whatever happened to be on the air in that microsecond.
+    float floorMin = 999.0f, floorMax = -999.0f, floorSum = 0.0f;
+    const int kSamples = 40;
+    for (int i = 0; i < kSamples; i++) {
+        float value = radio.getRSSI(false, true);
+        floorMin = std::min(floorMin, value);
+        floorMax = std::max(floorMax, value);
+        floorSum += value;
+        delay(5);
+    }
+    Serial.printf("RF,noisefloor_dbm,%.1f,%.1f,%.1f\n", static_cast<double>(floorMin),
+                   static_cast<double>(floorSum / kSamples), static_cast<double>(floorMax));
+
+    // The SX1278 has two transmit pins and only one of them is bonded to the antenna on any given
+    // module: PA_BOOST or RFO. RadioLib picks PA_BOOST unless told otherwise, and driving the pin
+    // the board did not wire would give exactly what is measured here - correct packet timing,
+    // success from transmit(), no supply current, and a signal ~100 dB below expectation from the
+    // little that leaks across. So key the PA both ways and let the supply current decide which
+    // pin this board actually uses.
+    if (g_rfCheckUseRfo) {
+        int16_t state = radio.setOutputPower(g_config.txPowerDbm, true);
+        Serial.printf("RF,output_pin,RFO,setOutputPower,%d\n", static_cast<int>(state));
+        uint8_t cfg = radio.mod()->SPIreadRegister(RADIOLIB_SX127X_REG_PA_CONFIG);
+        Serial.printf("RF,pa_config_after,0x%02X,paselect,%s\n", cfg,
+                       (cfg & 0x80) ? "PA_BOOST" : "RFO");
+    } else {
+        Serial.println("RF,output_pin,PA_BOOST");
+    }
+
+    // Transmit half: ten full-size packets, spaced so the PPK2 resolves each one as a step.
+    uint8_t buffer[64];
+    for (size_t i = 0; i < sizeof(buffer); i++) {
+        buffer[i] = static_cast<uint8_t>(i);
+    }
+    Serial.println("RF,tx_begin,10");
+    for (int i = 0; i < 10; i++) {
+        uint32_t t0 = micros();
+        int16_t state = radio.transmit(buffer, sizeof(buffer));
+        uint32_t elapsed = micros() - t0;
+        Serial.printf("RF,tx,%d,%d,%lu\n", i, static_cast<int>(state),
+                       static_cast<unsigned long>(elapsed));
+        delay(400);
+    }
+    radio.startReceive();
+    Serial.println("RDY");
+}
+
 void handleLine(char *line) {
     while (*line == ' ' || *line == '\t') {
         line++;
@@ -466,6 +603,12 @@ void handleLine(char *line) {
         handleRun();
     } else if (strcmp(line, "PING") == 0) {
         Serial.printf("PONG,%s\n", kRole);
+    } else if (strcmp(line, "RFCHECK") == 0) {
+        g_rfCheckUseRfo = false;
+        handleRfCheck();
+    } else if (strcmp(line, "RFCHECK RFO") == 0) {
+        g_rfCheckUseRfo = true;
+        handleRfCheck();
     } else if (strcmp(line, "INFO") == 0) {
         emitInfo();
     } else if (strcmp(line, "RESET") == 0) {
