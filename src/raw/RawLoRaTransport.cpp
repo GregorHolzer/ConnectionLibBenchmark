@@ -1,3 +1,11 @@
+/**
+ * @brief LoRa straight onto RadioLib, bypassing ConnectionLib.
+ *
+ * Sends the payload with no header at all - which is the point of the comparison, since
+ * ConnectionLib must add six bytes of addressing that a raw SX1278 has no concept of. The
+ * DutyCycleGuard stays: it is regulation, not a library feature, so both arms pay it.
+ */
+
 #include "raw/RawLoRaTransport.hpp"
 
 #if defined(ESP32)

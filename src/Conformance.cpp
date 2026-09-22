@@ -1,3 +1,11 @@
+/**
+ * @brief The EU radio envelope, checked before a configuration is allowed to run.
+ *
+ * Rejecting here rather than clamping is deliberate: a silently corrected parameter would be
+ * recorded as the value the host asked for, and the results would claim a configuration that was
+ * never measured. See docs/regulations.md.
+ */
+
 #include "Conformance.hpp"
 
 namespace bench {

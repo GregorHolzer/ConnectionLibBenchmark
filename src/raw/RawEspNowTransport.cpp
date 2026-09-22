@@ -1,3 +1,11 @@
+/**
+ * @brief ESP-NOW straight onto esp_now.h, bypassing ConnectionLib.
+ *
+ * The comparison arm: same exchange loop, same timing points, same records - only send() and
+ * poll() differ. Carries its own lock-free ring buffer and promiscuous-mode RSSI sniffer, because
+ * the C callbacks run in WiFi task context and there is no library here to do it for them.
+ */
+
 #include "raw/RawEspNowTransport.hpp"
 
 #if defined(ESP32)

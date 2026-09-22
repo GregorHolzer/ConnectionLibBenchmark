@@ -1,3 +1,11 @@
+/**
+ * @brief Zigbee straight onto xbee-arduino, bypassing ConnectionLib.
+ *
+ * Builds and parses XBee API frames itself. Keeps a single-slot pendingRx_ for the same reason the
+ * library backend does: a reply can land inside the TX-status wait, and dropping it would count as
+ * a loss something that actually arrived.
+ */
+
 #include "raw/RawZigbeeTransport.hpp"
 
 #if defined(ESP32)

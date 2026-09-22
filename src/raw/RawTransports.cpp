@@ -1,3 +1,5 @@
+/** @brief Factory for the raw arm. The rationale for the whole arm is in RawTransports.hpp. */
+
 #include "raw/RawTransports.hpp"
 
 #if defined(ESP32)
