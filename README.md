@@ -20,7 +20,35 @@ pio run -t upload -e bench_gateway
 ./run_campaign.py --preset full                       # the 10h campaign
 ./progress.py --watch                                 # live view of a running campaign
 ./verify_practices.py --results results/<campaign>    # the audit
-./plot_results.py  --results results/<campaign>       # figures
+./plot_results.py  --results results/<campaign>       # per-technology figures
+./plot_comparison.py --results results/<campaign>     # cross-technology comparison
+```
+
+Two arms and two capture modes, both off by default so every campaign stays comparable with those
+recorded before they existed:
+
+```bash
+./run_campaign.py --preset standard --rssi   # + per-packet RSSI/SNR (perturbs ESP-NOW & Zigbee)
+```
+
+`stack=raw` points are swept automatically alongside the library ones: the same exchange driven
+straight onto RadioLib / `esp_now.h` / xbee-arduino, so the difference measures what ConnectionLib
+costs. See [docs/metrics.md](docs/metrics.md) for what each arm does and does not bypass.
+
+`plot_results.py` asks what each radio's knobs do; `plot_comparison.py` asks how the three compare
+against each other, on the RQ1 metric set, with each technology represented by its best
+configuration rather than its baseline:
+
+```bash
+./plot_comparison.py --results results/<campaign> --report-flat   # + which knobs do nothing
+./plot_comparison.py --results results/<campaign> --best-by latency --pdr-floor 0.99
+```
+
+Sweeps whose knob moves neither latency nor energy can be left out of the per-technology set:
+
+```bash
+./plot_results.py --results results/<campaign> \
+    --skip-factor espnow:channel --skip-factor espnow:timeout
 ```
 
 Requires PlatformIO, `pyserial`, `matplotlib` and `ppk2-api` (the last only for energy
@@ -78,3 +106,6 @@ is reported as a result rather than relaxed — see [docs/regulations.md](docs/r
   it; the firmware rejects configurations that would leave it.
 - [docs/metrics.md](docs/metrics.md) — what is measured, how, and what this bench honestly cannot
   measure.
+- [docs/findings.md](docs/findings.md) — the measured state: cross-technology comparison, what
+  ConnectionLib costs against the raw radio API, signal quality, and the open problems. Every
+  number traces to a recorded campaign.
