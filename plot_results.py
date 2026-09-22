@@ -100,6 +100,23 @@ def save(fig, out_dir, name):
     print(f"  {name}.png / .pdf")
 
 
+def overlay_medians(ax, data, positions, color):
+    """Always-visible median marker per group.
+
+    A violin and a box both encode spread as *size*, so a near-deterministic distribution -
+    LoRa's time-on-air is repeatable to well under a millisecond - collapses to a sub-pixel
+    sliver and the figure reads as empty. The marker is drawn in axis-independent point units,
+    so it survives a log axis spanning two decades while still sitting inside the box wherever
+    there is genuine spread to show.
+    """
+    for position, values in zip(positions, data):
+        if not values:
+            continue
+        ordered = sorted(values)
+        median = ordered[len(ordered) // 2]
+        ax.plot([position], [median], marker="o", markersize=5, markerfacecolor=color,
+                 markeredgecolor=SURFACE, markeredgewidth=1.1, linestyle="none", zorder=6)
+
 def ms_formatter(value, _):
     return f"{value:g}"
 
@@ -200,6 +217,8 @@ def plot_factor(raw, points, tech, factor, out_dir):
         for line in box[element]:
             line.set_color(INK_2)
             line.set_linewidth(1.0)
+
+    overlay_medians(ax, data, list(positions), COLOR[tech])
 
     counts = ", ".join(f"{level}: n={len(by_level[level])}" for level in levels)
     style_axes(ax, FACTOR_LABEL.get(factor, factor), "round-trip latency (ms)",
@@ -421,16 +440,21 @@ def plot_standing_current(points, out_dir):
         for value in values:
             ax.plot(i, value / 1000.0, marker="_", markersize=18, color=INK_2, alpha=0.7,
                      zorder=4)
-        ax.text(i, median / 1000.0, f" {median / 1000.0:.1f} mA", ha="center", va="bottom",
-                 color=INK_2, fontsize=9)
+        # Inside the bar, not above it: LoRa and Zigbee sit within a millamp of the floor line,
+        # so a label placed above the bar lands on top of the floor annotation.
+        ax.text(i, median / 1000.0, f"{median / 1000.0:.1f} mA ", ha="center", va="top",
+                 color=SURFACE, fontsize=9, fontweight="bold", zorder=6,
+                 bbox=dict(boxstyle="round,pad=0.25", facecolor=COLOR[tech], edgecolor="none"))
 
     subtitle = "median of all repetitions; each tick is one repetition"
     if floor:
         floor_ma = statistics.median(floor) / 1000.0
-        ax.axhline(floor_ma, color=INK_2, linewidth=1.4, linestyle="--", zorder=5)
-        ax.text(0.99, floor_ma, f"board floor {floor_ma:.1f} mA (all radios down)  ",
-                 transform=ax.get_yaxis_transform(), ha="right", va="bottom", color=INK_2,
-                 fontsize=9)
+        # A legend rather than an inline label: LoRa and Zigbee idle within a millamp of the
+        # floor, so any text pinned to the line itself lands on a bar.
+        ax.axhline(floor_ma, color=INK_2, linewidth=1.4, linestyle="--", zorder=5,
+                    label=f"board floor {floor_ma:.1f} mA (all radios down)")
+        ax.legend(frameon=False, labelcolor=INK_2, fontsize=9, loc="upper right")
+        ax.set_ylim(0, max(statistics.median(rotations[t]) for t in present) / 1000.0 * 1.28)
         subtitle += ". Everything above the dashed line is the radio's own standing cost."
 
     style_axes(ax, "", "mean current while idle (mA)",
@@ -502,7 +526,7 @@ def plot_power_trace(results_dir, out_dir):
     if not traces:
         return
 
-    fig, axes = plt.subplots(len(traces), 1, figsize=(8.0, 2.4 * len(traces)), sharex=False)
+    fig, axes = plt.subplots(len(traces), 1, figsize=(8.0, 2.9 * len(traces)), sharex=False)
     fig.patch.set_facecolor(SURFACE)
     axes = axes if len(traces) > 1 else [axes]
 
@@ -522,6 +546,9 @@ def plot_power_trace(results_dir, out_dir):
         ax.plot(xs, [v / 1000.0 for v in values], color=COLOR[tech], linewidth=0.6)
         style_axes(ax, "time (s)", "current (mA)", f"{LABEL[tech]} — baseline configuration")
 
+    # Each panel carries its own title *and* x-label, so the stack needs real vertical room -
+    # at the default spacing a panel's "time (s)" lands on the next panel's title.
+    fig.subplots_adjust(hspace=0.62)
     fig.suptitle("Current traces: the shape behind the energy numbers", color=INK, fontsize=12,
                   x=0.02, ha="left", y=1.0)
     save(fig, out_dir, "energy-current-traces")
@@ -561,6 +588,9 @@ def plot_overview(raw, points, out_dir):
             line.set_color(INK_2)
             line.set_linewidth(1.0)
 
+    for position, values, tech in zip(positions, data, techs):
+        overlay_medians(ax, [values], [position], COLOR[tech])
+
     style_axes(ax, "", "round-trip latency (ms, log scale)",
                 "Baseline configuration, all three technologies",
                 "each technology at its own documented baseline; all repetitions pooled")
@@ -575,7 +605,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--results", required=True)
+    parser.add_argument("--skip-factor", action="append", default=[], metavar="TECH:FACTOR",
+                        help="do not render this factor figure; repeatable. For sweeps whose knob "
+                             "moves neither latency nor energy, which plot_comparison.py's "
+                             "--report-flat identifies. Example: --skip-factor espnow:channel")
     args = parser.parse_args()
+
+    skipped = set()
+    for entry in args.skip_factor:
+        tech, _, factor = entry.partition(":")
+        if not factor:
+            sys.exit(f"--skip-factor wants TECH:FACTOR, got {entry!r}")
+        skipped.add((tech, factor))
 
     results_dir = Path(args.results)
     if not results_dir.is_absolute():
@@ -601,6 +642,9 @@ def main():
     plot_power_trace(results_dir, out_dir)
     for tech in techs:
         for factor in sorted(factors_seen.get(tech, ())):
+            if (tech, factor) in skipped:
+                print(f"  {tech}-factor-{factor}: skipped")
+                continue
             plot_factor(raw, points, tech, factor, out_dir)
         plot_per_repetition(raw, tech, out_dir)
         plot_drift(raw, points, tech, out_dir)
