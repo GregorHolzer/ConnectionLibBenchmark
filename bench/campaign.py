@@ -192,11 +192,49 @@ def build_schedule(plan, techs):
 SETTLE_SECONDS = 3.0
 
 
+# Mirrors BenchRunner.cpp: the firmware abandons a sequence number after this many attempts.
+# Keeping the two in step is what makes run_timeout() an upper bound rather than a guess.
+MAX_ATTEMPTS_PER_SEQ = 5
+
+# Ceiling on a single point's wall clock. See run_timeout().
+RUN_TIMEOUT_CAP_S = 300
+
+
+def run_timeout(module, point, params):
+    """How long to wait for a point before declaring it failed.
+
+    The old formula was `estimated_seconds * 3 + 60`, which prices a run in which nothing is
+    retried. But a marginal link retries everything: the firmware allows five attempts per sequence
+    number, each costing a full reply-wait, so a point whose estimate is 7 s can legitimately take
+    210 s. The host would give up at 81 s while the board was still working, and then send the next
+    CFG into a stream that nobody was reading - which is how one bad point took the next six with
+    it.
+
+    So the timeout is the worst case the firmware can actually reach, and a failure now means the
+    point really did fail rather than that the host was impatient.
+    """
+    exchanges = module.exchanges(point)
+    reply_wait_ms = params.get("replywait", 4000)
+    spacing_ms = params.get("spacing", 100)
+    worst_case_s = exchanges * MAX_ATTEMPTS_PER_SEQ * (reply_wait_ms + spacing_ms) / 1000.0
+    optimistic_s = module.estimated_seconds(point) * 3 + 60
+    # Capped, because the true worst case is 18 minutes for ESP-NOW and 35 for Zigbee - both of
+    # which are only reached when every single exchange fails five times, i.e. when the link is
+    # dead and waiting longer tells you nothing you do not already know. Giving up early is safe
+    # now that a failure is followed by resync(): the board is left to finish in its own time and
+    # the next point starts against a clean stream rather than a busy one.
+    return max(optimistic_s, min(worst_case_s + 30, RUN_TIMEOUT_CAP_S))
+
+
 class CampaignRunner:
     """Executes a schedule against the two boards, streaming results to disk as it goes."""
 
     def __init__(self, gateway, node, gateway_peer, node_peer, out_dir, writer, status_path,
-                 log=print, power=None, settle_s=SETTLE_SECONDS):
+                 log=print, power=None, settle_s=SETTLE_SECONDS, capture_rssi=False):
+        # Campaign-wide rather than per-point, because it is not a swept factor: capturing signal
+        # quality costs a promiscuous sniffer on ESP-NOW and a UART round trip on Zigbee, so a run
+        # with it on is a different experiment from one without, not another point in the same one.
+        self.capture_rssi = capture_rssi
         self.gateway = gateway
         self.node = node
         # Optional PPK2. None means the campaign runs exactly as before, without energy columns.
@@ -257,6 +295,18 @@ class CampaignRunner:
 
         self.status_path.write_text(json.dumps(status, indent=2))
 
+    def _with_rssi(self, params):
+        """Stamp the campaign-wide RSSI setting onto a CFG.
+
+        Only when enabled: a CFG is a complete specification and the firmware starts from defaults
+        each time, so omitting the key is the same as sending rssi=0. Leaving it out keeps the
+        emitted CFG lines byte-identical to those of campaigns recorded before this existed, which
+        is what lets the two be compared.
+        """
+        if self.capture_rssi:
+            params["rssi"] = 1
+        return params
+
     def _run_idle(self, run):
         """Standing-cost measurement: configure, then hold without exchanging.
 
@@ -269,8 +319,8 @@ class CampaignRunner:
             node_params = dict(params)
         else:
             module = technologies.get(tech)
-            params = module.cfg_params(run.point, self.gateway_peer)
-            node_params = module.cfg_params(run.point, self.node_peer)
+            params = self._with_rssi(module.cfg_params(run.point, self.gateway_peer))
+            node_params = self._with_rssi(module.cfg_params(run.point, self.node_peer))
             node_params.pop("n", None)
 
         self.node.configure(node_params)
@@ -302,7 +352,7 @@ class CampaignRunner:
             return self._run_idle(run)
 
         module = technologies.get(run.tech)
-        params = module.cfg_params(run.point, self.gateway_peer)
+        params = self._with_rssi(module.cfg_params(run.point, self.gateway_peer))
         airtime = module.airtime_seconds(run.point)
         if exchanges_override:
             scale = exchanges_override / module.exchanges(run.point)
@@ -316,14 +366,14 @@ class CampaignRunner:
             self.duty_wait_total_s += waited
             self.log(f"  duty cycle: waited {waited:.0f}s for airtime budget")
 
-        node_params = module.cfg_params(run.point, self.node_peer)
+        node_params = self._with_rssi(module.cfg_params(run.point, self.node_peer))
         node_params.pop("n", None)   # the node serves continuously; it has no exchange count
         self.node.configure(node_params)
         header = self.gateway.configure(params)
         self._settle(run.tech)
 
         started_at = time.time()
-        timeout = module.estimated_seconds(run.point) * 3 + 60
+        timeout = run_timeout(module, run.point, params)
         # The energy window brackets only the measured exchange, not the CFG teardown and rebuild
         # that precedes it - otherwise every point would carry the cost of constructing a Transport.
         window = self.power.open(run.point.key, run.rotation) if self.power else None

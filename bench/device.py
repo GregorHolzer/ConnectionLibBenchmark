@@ -140,6 +140,35 @@ class Device:
         _, records = self._read_until(("RDY", "ERR,"), timeout_s or (duration_ms / 1000.0 + 30))
         return records
 
+    def resync(self, timeout_s=300.0):
+        """Wait for a board that is still working to go quiet, after a command gave up on it.
+
+        A run that overruns its timeout has not stopped - the firmware retries every exchange up to
+        five times, so the board can still be grinding for minutes after the host stopped listening.
+        Sending the next CFG into that stream gets no ACK, and the point after it fails for a reason
+        that has nothing to do with its own configuration. That is how one marginal point used to
+        take the next six down with it.
+
+        Returns True if the board reported RDY (it finished on its own), False if it simply fell
+        silent. Either way the stream is clean enough for the next CFG.
+        """
+        deadline = time.time() + timeout_s
+        quiet_needed = 1.5
+        last_seen = time.time()
+        finished = False
+        while time.time() < deadline:
+            raw = self._serial.readline()
+            if raw:
+                last_seen = time.time()
+                if "RDY" in raw.decode(errors="replace"):
+                    finished = True
+                    break
+                continue
+            if time.time() - last_seen > quiet_needed:
+                break
+        self._serial.reset_input_buffer()
+        return finished
+
     def drain(self, seconds=0.3):
         """Collect whatever the board has emitted since the last read - the node's PPN/PPM
         records accumulate while the gateway is driving the exchange."""

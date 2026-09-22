@@ -93,6 +93,12 @@ def main():
                               "PPK2 sits in series with an externally powered rail")
     parser.add_argument("--no-power", action="store_true",
                          help="skip energy measurement even if a PPK2 is attached")
+    parser.add_argument("--rssi", action="store_true",
+                        help="capture per-packet RSSI/SNR. Free on LoRa, but costs a promiscuous "
+                             "sniffer on ESP-NOW and a DB AT query per receive on Zigbee, both of "
+                             "which shift the energy and latency figures - so a campaign run with "
+                             "this is a signal-quality campaign, not a timing one, and meta.json "
+                             "records which it was.")
     parser.add_argument("--control-campaign",
                          help="name of an earlier campaign this one should be compared against "
                               "(e.g. a pre-strip run, to show the strip changed only power)")
@@ -204,6 +210,11 @@ def main():
             "power": ({"mode": args.power_mode, "voltage_mv": args.power_voltage_mv,
                         "measured_board": "node"} if power else None),
             "control_campaign": args.control_campaign,
+            # The single fact that decides whether this campaign may be pooled with another.
+            # Capturing signal quality perturbs ESP-NOW (promiscuous sniffer) and Zigbee (a UART
+            # round trip per receive), so a campaign recorded with it on measures a different
+            # system from one recorded without.
+            "rssi_capture": bool(args.rssi),
             "benchmark_git_sha": git_sha(REPO_ROOT),
             "connectionlib_git_sha": git_sha(REPO_ROOT / "ConnectionLib"),
             # Practice P14: record the full configuration space, not only what was reached.
@@ -215,7 +226,7 @@ def main():
         })
 
         runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
-                                 out_dir / "status.json", power=power)
+                                 out_dir / "status.json", power=power, capture_rssi=args.rssi)
         started = time.time()
         interrupted = False
 
@@ -248,6 +259,17 @@ def main():
                 print(f"    FAILED: {exc}")              # die because one point misbehaved
                 runner.failures.append({"index": run.index, "point": run.point.key,
                                          "error": str(exc)})
+                # A board that overran its timeout has not stopped - the firmware retries every
+                # exchange up to five times, so it can still be transmitting for minutes. Sending
+                # the next CFG into that stream gets no ACK, and the *following* point fails for a
+                # reason that has nothing to do with its own configuration. Waiting for the board
+                # to finish is what keeps one marginal point from taking the next six with it.
+                for board in (runner.gateway, runner.node):
+                    try:
+                        if board.resync():
+                            print(f"    {board.name} finished late; stream resynchronised")
+                    except Exception as resync_exc:       # noqa: BLE001 - best effort by design
+                        print(f"    {board.name} resync failed: {resync_exc}")
                 runner.completed += 1
                 continue
 

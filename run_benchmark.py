@@ -51,6 +51,12 @@ def main():
                               "PPK2 sits in series with an externally powered rail")
     parser.add_argument("--no-power", action="store_true",
                          help="skip energy measurement even if a PPK2 is attached")
+    parser.add_argument("--rssi", action="store_true",
+                        help="capture per-packet RSSI/SNR. Free on LoRa, but costs a promiscuous "
+                             "sniffer on ESP-NOW and a DB AT query per receive on Zigbee, both of "
+                             "which shift the energy and latency figures - so a campaign run with "
+                             "this is a signal-quality campaign, not a timing one, and meta.json "
+                             "records which it was.")
     args = parser.parse_args()
 
     ensure_pyserial(args.pio)
@@ -124,6 +130,7 @@ def main():
                         "measured_board": "node"} if power else None),
             "benchmark_git_sha": git_sha(REPO_ROOT),
             "connectionlib_git_sha": git_sha(REPO_ROOT / "ConnectionLib"),
+            "rssi_capture": bool(args.rssi),
             "configuration_space": {
                 args.tech: [{"factor": p.factor, "level": p.level, "params": p.params}
                              for p in module.points()]
@@ -131,7 +138,7 @@ def main():
         })
 
         runner = CampaignRunner(gateway, node, gateway_peer, node_peer, out_dir, writer,
-                                 out_dir / "status.json", power=power)
+                                 out_dir / "status.json", power=power, capture_rssi=args.rssi)
 
         override = 10 if args.quick else None
         for run in schedule:
