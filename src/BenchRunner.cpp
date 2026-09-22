@@ -130,6 +130,12 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
 
         uint32_t rttUs = 0;
         bool ok = false;
+        // Signal quality of the *reply*, not of the send. RSSI and SNR are receive-side
+        // quantities - no backend populates SendResult's copies, and printing those is why this
+        // column was empty in every campaign before now. The reply is the only packet this board
+        // receives in an exchange, so its metrics are the ones the gateway can honestly report.
+        std::optional<float> replyRssi;
+        std::optional<float> replySnr;
         if (result.status == SendStatus::Ok) {
             uint32_t waitStart = millis();
             while (millis() - waitStart < config.replyWaitMs) {
@@ -138,6 +144,8 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
                     matches(*received, 'Q', static_cast<uint16_t>(seq), payloadLen)) {
                     rttUs = micros() - t0;
                     ok = true;
+                    replyRssi = received->rssiDbm;
+                    replySnr = received->snrDb;
                     break;
                 }
                 delayMicroseconds(kPollIntervalUs);
@@ -151,9 +159,9 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
                        static_cast<unsigned>(result.totalBytes), static_cast<unsigned long>(sendUs),
                        static_cast<unsigned long>(rttUs), static_cast<int>(result.status),
                        result.acknowledged ? 1 : 0);
-        printOptional(result.rssiDbm);
+        printOptional(replyRssi);
         Serial.print(',');
-        printOptional(result.snrDb);
+        printOptional(replySnr);
         Serial.printf(",%.4f,%d\n", static_cast<double>(transport.currentDutyCyclePercent()),
                        ok ? 1 : 0);
 
