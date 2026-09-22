@@ -9,8 +9,10 @@ numbers carry the baseline that makes them interpretable at all.
 import statistics
 from collections import defaultdict
 
-from ..analysis import (gross_outliers, idle_baselines, median_confidence_interval, percentile,
-                        rank_stability, triscale_runs_needed)
+from ..analysis import (gross_outliers, median_confidence_interval, percentile,
+                        triscale_runs_needed)
+from ..energy import idle_baselines
+from ..ranking import rank_stability
 from .report import FAIL, MAX_OUTLIER_FRACTION, MIN_RANK_STABILITY, PASS, SKIP, WARN
 
 

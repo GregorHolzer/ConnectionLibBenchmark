@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # bench.plotting selects the headless Agg backend, so it has to be imported before pyplot.
 from bench.plotting import LABEL, TECH_ORDER
-from bench.comparison import (aggregate, board_floor_ua, flat_factors, select_best,
-                               standing_currents)
+from bench.comparison import aggregate
+from bench.selection import flat_factors, select_best
+from bench.standing import board_floor_ua, standing_currents
 from bench.figures.comparison_best import plot_best_config
 from bench.figures.comparison_energy import plot_energy_budget
 from bench.figures.comparison_signal import plot_signal_quality

@@ -1,183 +1,24 @@
-"""Campaign scheduling and execution.
+"""Executing a schedule against the two boards, streaming results to disk as it goes.
 
-Two things here carry most of the methodological weight:
+What to run and in what order is bench/schedule.py; how long to wait is bench/pacing.py. This
+module is the part that talks to hardware: configure both boards, settle the radio, open the
+energy window around the measured exchange only, run, and write the point out before moving on.
 
-**Execution order (practice P9).** Repetitions of the same configuration are never run back to
-back. The schedule is *repetition-major* - every configuration point once, then every point again -
-and technologies rotate between repetitions, so a given point's repeats are separated by the whole
-rest of the campaign. The point order is also rotated each time round, so the same configuration
-does not always sit at the start of its block. This is exactly the ordering slide 18 of
-`02_experimentation.pdf` argues for: a transient external event then damages every configuration a
-little instead of destroying one completely.
+Two details here are load-bearing rather than incidental:
 
-**Airtime pacing.** LoRa's 10 % duty cycle is enforced *here*, on the host, and that is not
-redundant with the on-device `DutyCycleGuard`: the firmware rebuilds its Transport on every CFG,
-which constructs a fresh guard and discards its ledger, so the device cannot see across
-configuration points. The host tracks a rolling one-hour window over the whole campaign and waits
-when the next point would exceed it.
+* **Each board's peer is the other board.** Handing both the same peer makes ESP-NOW talk to
+  itself and every exchange time out.
+* **The energy window brackets the exchange, not the CFG.** Including the teardown and rebuild
+  would charge every point the cost of constructing a Transport.
 """
 
 import json
 import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Any
 
 from . import technologies
+from .pacing import AirtimeBudget, run_timeout
 from .records import parse_records
-
-# ETSI EN 300 220-2 / ERC-REC 70-03 h1.3 - see docs/regulations.md.
-DUTY_CYCLE_FRACTION = 0.10
-DUTY_CYCLE_WINDOW_S = 3600.0
-
-# Roughly how long a CFG round trip plus bookkeeping costs, per point. Measured at ~2 s, dominated
-# by the two transports being torn down and rebuilt.
-POINT_OVERHEAD_S = 4.0
-
-# Share of the campaign's wall clock each technology gets. LoRa takes the largest share because
-# it is the only one whose cost is set by regulation rather than by software, and it still ends up
-# with the fewest repetitions.
-DEFAULT_SHARES = {"lora": 0.55, "zigbee": 0.25, "espnow": 0.20}
-
-PRESETS = {"quick": 0.5, "standard": 3.0, "full": 10.0}
-
-
-@dataclass(frozen=True)
-class ScheduledRun:
-    index: int
-    rotation: int
-    point: Any
-
-    @property
-    def tech(self):
-        return self.point.tech
-
-
-class AirtimeBudget:
-    """Rolling-window airtime ledger, in the host, spanning the whole campaign."""
-
-    def __init__(self, fraction=DUTY_CYCLE_FRACTION, window_s=DUTY_CYCLE_WINDOW_S):
-        self.fraction = fraction
-        self.window_s = window_s
-        self.limit_s = fraction * window_s
-        self._entries = deque()   # (timestamp, seconds)
-        self.total_s = 0.0
-
-    def _prune(self, now):
-        while self._entries and now - self._entries[0][0] > self.window_s:
-            self._entries.popleft()
-
-    def used(self, now=None):
-        now = now or time.time()
-        self._prune(now)
-        return sum(seconds for _, seconds in self._entries)
-
-    def record(self, seconds):
-        if seconds <= 0:
-            return
-        self._entries.append((time.time(), seconds))
-        self.total_s += seconds
-
-    def wait_for(self, seconds, sleeper=time.sleep):
-        """Block until `seconds` of additional airtime would fit inside the window.
-
-        Returns how long it waited, which the campaign records - a large value is not a stall but
-        the duty cycle being visibly enforced, and it belongs in the results.
-        """
-        if seconds <= 0:
-            return 0.0
-        waited = 0.0
-        while True:
-            now = time.time()
-            self._prune(now)
-            if self.used(now) + seconds <= self.limit_s:
-                return waited
-            # Wait until the oldest entry ages out of the window.
-            oldest_at, _ = self._entries[0]
-            pause = max(1.0, (oldest_at + self.window_s) - now + 0.5)
-            sleeper(pause)
-            waited += pause
-
-
-def cost_per_repetition(module):
-    """Wall clock one repetition of a technology's whole point list needs.
-
-    For LoRa the duty cycle, not the exchange time, sets the floor: transmitting A seconds of
-    airtime legally takes at least A/0.10 seconds of wall clock.
-    """
-    points = module.points()
-    measured = sum(module.estimated_seconds(p) + POINT_OVERHEAD_S for p in points)
-    airtime = sum(module.airtime_seconds(p) for p in points)
-    duty_floor = airtime / DUTY_CYCLE_FRACTION if airtime else 0.0
-    return max(measured, duty_floor), airtime, len(points)
-
-
-def allocate(budget_hours, techs, shares=None):
-    """Repetitions per technology for a given wall-clock budget.
-
-    Two passes, because the idle points are scheduled once per rotation and sit outside the
-    per-technology point lists: a first pass does not know how many rotations there will be, so it
-    cannot reserve their time, and would over-commit the budget.
-    """
-    first = _allocate_once(budget_hours * 3600.0, techs, shares)
-    rotations = max(entry["repetitions"] for entry in first.values())
-    idle_cost = rotations * (1 + len(techs)) * (technologies.IDLE_SECONDS + POINT_OVERHEAD_S)
-
-    plan = _allocate_once(max(budget_hours * 3600.0 - idle_cost, 60.0), techs, shares)
-    for entry in plan.values():
-        entry["idle_reserved_s"] = round(idle_cost, 1)
-    return plan
-
-
-def _allocate_once(budget_s, techs, shares=None):
-    shares = shares or DEFAULT_SHARES
-    total_share = sum(shares.get(t, 0.0) for t in techs) or 1.0
-
-    plan = {}
-    for tech in techs:
-        module = technologies.get(tech)
-        per_rep, airtime, n_points = cost_per_repetition(module)
-        tech_budget = budget_s * (shares.get(tech, 0.0) / total_share)
-        reps = max(1, int(tech_budget // per_rep)) if per_rep else 1
-        plan[tech] = {
-            "repetitions": reps,
-            "points": n_points,
-            "seconds_per_repetition": round(per_rep, 1),
-            "airtime_per_repetition_s": round(airtime, 1),
-            "budget_s": round(tech_budget, 1),
-            "estimated_total_s": round(reps * per_rep, 1),
-        }
-    return plan
-
-
-def build_schedule(plan, techs):
-    """Repetition-major, technology-rotating, point-order-rotated. See practice P9.
-
-    The resulting order is what `verify_practices.py` audits - it reconstructs the real execution
-    order from timestamps in the data rather than trusting this function.
-    """
-    point_lists = {tech: technologies.get(tech).points() for tech in techs}
-    max_reps = max(plan[t]["repetitions"] for t in techs)
-    idle = technologies.idle_points(techs)
-
-    schedule, index = [], 0
-    for rotation in range(max_reps):
-        # Standing-cost measurements lead every rotation, so each one is repeated as often as the
-        # rotations themselves and gets the same reproducibility treatment as the active points.
-        for point in idle:
-            schedule.append(ScheduledRun(index, rotation, point))
-            index += 1
-        for tech in techs:
-            if rotation >= plan[tech]["repetitions"]:
-                continue
-            points = point_lists[tech]
-            # Rotate the starting offset so a given point does not always lead its block.
-            offset = rotation % len(points)
-            for point in points[offset:] + points[:offset]:
-                schedule.append(ScheduledRun(index, rotation, point))
-                index += 1
-    return schedule
-
 
 # Settle time after switching to a different technology, before the energy window opens. CFG
 # returns as soon as the firmware acknowledges it, which is before the radio has reached its
@@ -190,40 +31,6 @@ def build_schedule(plan, techs):
 # technology's block rebuild the Transport too, and those showed no warm-up. That keeps the cost
 # at a few seconds per rotation rather than per point.
 SETTLE_SECONDS = 3.0
-
-
-# Mirrors BenchRunner.cpp: the firmware abandons a sequence number after this many attempts.
-# Keeping the two in step is what makes run_timeout() an upper bound rather than a guess.
-MAX_ATTEMPTS_PER_SEQ = 5
-
-# Ceiling on a single point's wall clock. See run_timeout().
-RUN_TIMEOUT_CAP_S = 300
-
-
-def run_timeout(module, point, params):
-    """How long to wait for a point before declaring it failed.
-
-    The old formula was `estimated_seconds * 3 + 60`, which prices a run in which nothing is
-    retried. But a marginal link retries everything: the firmware allows five attempts per sequence
-    number, each costing a full reply-wait, so a point whose estimate is 7 s can legitimately take
-    210 s. The host would give up at 81 s while the board was still working, and then send the next
-    CFG into a stream that nobody was reading - which is how one bad point took the next six with
-    it.
-
-    So the timeout is the worst case the firmware can actually reach, and a failure now means the
-    point really did fail rather than that the host was impatient.
-    """
-    exchanges = module.exchanges(point)
-    reply_wait_ms = params.get("replywait", 4000)
-    spacing_ms = params.get("spacing", 100)
-    worst_case_s = exchanges * MAX_ATTEMPTS_PER_SEQ * (reply_wait_ms + spacing_ms) / 1000.0
-    optimistic_s = module.estimated_seconds(point) * 3 + 60
-    # Capped, because the true worst case is 18 minutes for ESP-NOW and 35 for Zigbee - both of
-    # which are only reached when every single exchange fails five times, i.e. when the link is
-    # dead and waiting longer tells you nothing you do not already know. Giving up early is safe
-    # now that a failure is followed by resync(): the board is left to finish in its own time and
-    # the next point starts against a clean stream rather than a busy one.
-    return max(optimistic_s, min(worst_case_s + 30, RUN_TIMEOUT_CAP_S))
 
 
 class CampaignRunner:

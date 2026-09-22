@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench import technologies
-from bench.campaign import CampaignRunner, ScheduledRun
+from bench.campaign import CampaignRunner
+from bench.schedule import ScheduledRun
 from bench.device import (Device, detect_ports, ensure_pyserial, flash, read_mac_for_port,
                            wait_for_port)
 from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor

@@ -22,7 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from bench import technologies                                   # noqa: E402
-from bench.campaign import DUTY_CYCLE_FRACTION, POINT_OVERHEAD_S, build_schedule   # noqa: E402
+from bench.pacing import DUTY_CYCLE_FRACTION                       # noqa: E402
+from bench.schedule import POINT_OVERHEAD_S, build_schedule        # noqa: E402
 
 BAR_WIDTH = 42
 GREEN, YELLOW, RED, DIM, BOLD, RESET = (
