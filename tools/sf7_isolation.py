@@ -12,7 +12,8 @@ cause is the supply, not the software.
 """
 import argparse, sys, time
 sys.path.insert(0, "/home/gregor/ConnectionLibBenchmark")
-from bench.device import Device, DeviceError
+from bench.device import Device
+from bench.ports import DeviceError
 
 GW = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_573C000618-if00"
 ND = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5748001588-if00"

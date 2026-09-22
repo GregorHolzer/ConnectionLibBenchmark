@@ -30,11 +30,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench import technologies
+from bench.bringup import resolve_ports, start_power
 from bench.campaign import CampaignRunner
+from bench.campaign_loop import run_schedule
 from bench.schedule import PRESETS, allocate, build_schedule
-from bench.device import (Device, detect_ports, ensure_pyserial, flash, read_mac_for_port,
-                           wait_for_port)
-from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
+from bench.device import Device
+from bench.ports import ensure_pyserial, flash, read_mac_for_port
+from bench.power import DEFAULT_VOLTAGE_MV
 from bench.results import ResultWriter, write_meta
 from bench.util import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
 
@@ -126,27 +128,10 @@ def main():
         out_dir = REPO_ROOT / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # The PPK2 comes up before anything touches the boards. In source mode it *is* the node's
-    # supply, and the node's USB-serial chip runs off the board rail (its cable has VBUS cut), so
-    # until the rail is up the node has no serial port to detect, flash, or open. DUT power also
-    # drops the moment the session closes, so this one monitor has to span the whole campaign.
-    power = None if args.no_power else PowerMonitor.create(
-        port=args.power_port, voltage_mv=args.power_voltage_mv, mode=args.power_mode,
-        raw_dir=out_dir / "power_traces")
-    if power is None and not args.no_power and args.power_mode == "source":
-        sys.exit("source mode: the PPK2 is the node's only supply, but it would not start. "
-                 "Fix it, or pass --no-power if the node is powered some other way.")
-
-    gw_port, node_port = args.gateway_port, args.node_port
-    if not gw_port or not node_port:
-        detected = detect_ports(args.pio, expect=2, timeout_s=20.0)
-        if len(detected) != 2:
-            sys.exit(f"expected exactly 2 serial devices, found {len(detected)}: {detected}")
-        gw_port = gw_port or detected[0]
-        node_port = node_port or detected[1]
-    for port in (gw_port, node_port):
-        if not wait_for_port(port):
-            sys.exit(f"{port} never appeared — is the PPK2 powering that board?")
+    # Rail first, then the boards: see bench/bringup.py for why that order is forced. The monitor
+    # has to span the whole campaign, because DUT power drops when its session closes.
+    power = start_power(args, out_dir / "power_traces")
+    gw_port, node_port = resolve_ports(args)
     print(f"\ngateway {gw_port}\nnode    {node_port}")
 
     # Two flashes for the entire campaign. Everything after this is runtime configuration.
@@ -206,73 +191,7 @@ def main():
         runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
                                  out_dir / "status.json", power=power, capture_rssi=args.rssi)
         started = time.time()
-        interrupted = False
-
-        for run in schedule:
-            if interrupted:
-                break
-            if run.index in already_done:
-                runner.completed += 1
-                continue
-
-            # Idle points have no technology module — the board floor is not any one radio's, and
-            # they exchange nothing, so expected-count reporting does not apply to them.
-            is_idle = run.point.factor == "idle"
-            module = None if is_idle else technologies.get(run.tech)
-            elapsed = time.time() - started
-            print(f"[{runner.completed + 1}/{len(schedule)}] {format_duration(elapsed)} "
-                  f"rot={run.rotation} {run.point.key}", flush=True)
-            runner._write_status(schedule, current=run.point.key)
-
-            try:
-                ok, exchanges, summary = runner.run_one(run)
-            except KeyboardInterrupt:
-                # The point in flight is abandoned rather than recorded: it was cut mid-exchange,
-                # so its energy window and its exchange count are both short. --resume will
-                # re-run it, because only completed points are written to points.jsonl.
-                print("\n    interrupted mid-point — discarding it, stopping cleanly")
-                interrupted = True
-                break
-            except Exception as exc:                     # noqa: BLE001 - a ten-hour run must not
-                print(f"    FAILED: {exc}")              # die because one point misbehaved
-                runner.failures.append({"index": run.index, "point": run.point.key,
-                                         "error": str(exc)})
-                # A board that overran its timeout has not stopped - the firmware retries every
-                # exchange up to five times, so it can still be transmitting for minutes. Sending
-                # the next CFG into that stream gets no ACK, and the *following* point fails for a
-                # reason that has nothing to do with its own configuration. Waiting for the board
-                # to finish is what keeps one marginal point from taking the next six with it.
-                for board in (runner.gateway, runner.node):
-                    try:
-                        if board.resync():
-                            print(f"    {board.name} finished late; stream resynchronised")
-                    except Exception as resync_exc:       # noqa: BLE001 - best effort by design
-                        print(f"    {board.name} resync failed: {resync_exc}")
-                runner.completed += 1
-                continue
-
-            if is_idle:
-                held = summary.get("elapsed_ms", 0) / 1000.0 if summary else 0.0
-                print(f"    idle held {held:.0f}s")
-            elif ok and exchanges:
-                rtts = sorted(e["rtt_us"] for e in exchanges if e["ok"])
-                median = rtts[len(rtts) // 2] / 1000.0 if rtts else 0.0
-                print(f"    ok  {summary['successes']}/{module.exchanges(run.point)}  "
-                      f"median rtt {median:.2f} ms  retries {summary['retries']}")
-                runner.recent.append({"point": run.point.key, "rtt_ms": round(median, 3)})
-            else:
-                got = summary["successes"] if summary else 0
-                print(f"    INCOMPLETE {got}/{module.exchanges(run.point)}")
-
-            runner.completed += 1
-            try:
-                runner._write_status(schedule)
-            except KeyboardInterrupt:
-                # Ctrl-C between points: the point just finished is already flushed to disk, so
-                # there is nothing to discard.
-                print("\n  interrupted — stopping cleanly")
-                interrupted = True
-                break
+        interrupted = run_schedule(runner, schedule, already_done, started)
 
         runner._write_status(schedule)
         if power:

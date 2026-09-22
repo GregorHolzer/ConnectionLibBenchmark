@@ -21,14 +21,17 @@ host-side windowing jitter is tens of milliseconds against points lasting second
 
 Everything here is optional. If the package is missing or no PPK2 is attached, `PowerMonitor.create`
 returns None and the campaign runs exactly as before, without energy columns.
+
+Getting the device to talk at all - picking the right interface, un-wedging one left streaming,
+naming whoever else holds the port - is bench/ppk2_port.py.
 """
 
-import os
-import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .ppk2_port import find_port, port_holder, recover_streaming
 
 # The 5 V header pin feeds the same net as USB VBUS, so the board sees what a USB supply would
 # give it. This must match the rail actually being sourced: energy_mj is charge times this
@@ -86,11 +89,11 @@ class PowerMonitor:
 
         try:
             if port is None:
-                port = cls._find_port(log)
+                port = find_port(log)
                 if port is None:
                     return None
 
-            cls._recover_streaming(port)
+            recover_streaming(port)
             ppk2 = PPK2_API(port)
             ppk2.get_modifiers()
             if mode == "source":
@@ -107,7 +110,7 @@ class PowerMonitor:
                 + (f" at {voltage_mv} mV" if mode == "source" else ""))
             return monitor
         except Exception as exc:                       # noqa: BLE001 - see docstring
-            holder = cls._port_holder(port)
+            holder = port_holder(port)
             if holder:
                 # By far the most common cause, and the library's own error ("device reports
                 # readiness to read but returned no data") gives no hint of it.
@@ -116,90 +119,6 @@ class PowerMonitor:
             else:
                 log(f"power: PPK2 setup failed ({exc}) — continuing without energy measurement")
             return None
-
-    @staticmethod
-    def _find_port(log):
-        """The PPK2's *data* interface.
-
-        A PPK2 presents two CDC-ACM interfaces and `list_devices()` returns both, unordered. Only
-        the lower one carries the measurement stream; opening the other yields a trickle of
-        nonsense - in testing, 24 samples in 3 s averaging 81 A. So resolve through
-        /dev/serial/by-id and take the lowest interface number rather than trusting list order.
-        """
-        from ppk2_api.ppk2_api import PPK2_API
-
-        by_id = Path("/dev/serial/by-id")
-        if by_id.is_dir():
-            candidates = sorted(
-                (int(re.search(r"-if(\d+)", p.name).group(1)), p.resolve())
-                for p in by_id.glob("*PPK2*") if re.search(r"-if(\d+)", p.name))
-            if candidates:
-                return str(candidates[0][1])
-
-        devices = PPK2_API.list_devices()
-        ports = sorted(d[0] if isinstance(d, (tuple, list)) else d for d in devices)
-        if not ports:
-            log("power: no PPK2 found — continuing without energy measurement")
-            return None
-        return ports[0]
-
-    @staticmethod
-    def _recover_streaming(port, timeout_s=5.0):
-        """Quiet a PPK2 left mid-stream by a previous run, and drain its backlog.
-
-        `get_modifiers()` decodes the device's reply as UTF-8, so leftover sample bytes surface as
-        `UnicodeDecodeError: invalid start byte` — which points nowhere near the real cause. Any
-        run that ended without `stop()` leaves the device streaming, so this has to happen before
-        the handshake rather than as a special case in one tool.
-
-        One read is not enough: the buffer caps at ~4 kB while the device keeps sending, so drain
-        until the port stays quiet for three consecutive polls. Backlogs of 130–160 kB are normal
-        after a killed run.
-        """
-        try:
-            import serial
-            from ppk2_api.ppk2_api import PPK2_Command
-            with serial.Serial(port, timeout=0.1) as ser:
-                ser.write(bytes((PPK2_Command.AVERAGE_STOP,)))
-                ser.flush()
-                total, quiet, deadline = 0, 0, time.time() + timeout_s
-                while time.time() < deadline and quiet < 3:
-                    waiting = ser.in_waiting
-                    if waiting:
-                        total += len(ser.read(waiting))
-                        quiet = 0
-                    else:
-                        quiet += 1
-                    time.sleep(0.1)
-                return total
-        except Exception:                              # noqa: BLE001 - purely opportunistic
-            return 0
-
-    @staticmethod
-    def _port_holder(port):
-        """Name *another* process holding `port`, by scanning /proc. None if nothing does.
-
-        Skipping our own pid matters: by the time this runs from `create`'s error handler, PPK2_API
-        has already opened the port, so an unfiltered scan finds our own descriptor and reports the
-        caller as the culprit - which hides whatever actually failed.
-        """
-        if not port:
-            return None
-        own = str(os.getpid())
-        try:
-            for proc in Path("/proc").iterdir():
-                if not proc.name.isdigit() or proc.name == own:
-                    continue
-                try:
-                    for link in (proc / "fd").iterdir():
-                        if str(link.resolve()) == port:
-                            name = (proc / "comm").read_text().strip()
-                            return f"{name} (pid {proc.name})"
-                except (OSError, PermissionError):
-                    continue
-        except OSError:
-            pass
-        return None
 
     # -- lifecycle ------------------------------------------------------------------------
 
