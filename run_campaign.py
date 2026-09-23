@@ -50,6 +50,9 @@ from bench.util import COORDINATOR_ZIGBEE_PEER, DEFAULT_ZIGBEE_PEER, format_dura
 
 REPO_ROOT = Path(__file__).resolve().parent
 
+# One ledger for every run on these boards, so the duty cycle holds across campaigns and resumes.
+AIRTIME_LEDGER = REPO_ROOT / "results" / "lora_airtime_ledger.txt"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
@@ -244,10 +247,15 @@ def main():
         if args.field:
             runner = FieldCampaignRunner(node, peer, int(field["campaign_id"], 16), out_dir,
                                          writer, out_dir / "status.json", power=power,
-                                         capture_rssi=args.rssi)
+                                         capture_rssi=args.rssi, airtime_ledger=AIRTIME_LEDGER)
         else:
             runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
-                                     out_dir / "status.json", power=power, capture_rssi=args.rssi)
+                                     out_dir / "status.json", power=power, capture_rssi=args.rssi,
+                                     airtime_ledger=AIRTIME_LEDGER)
+        carried = runner.airtime.carried_over()
+        if carried:
+            print(f"LoRa airtime from runs in the last hour: {carried:.0f}s of "
+                  f"{runner.airtime.limit_s:.0f}s")
         started = time.time()
         interrupted = run_schedule(runner, schedule, already_done, started)
 

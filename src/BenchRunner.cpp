@@ -40,6 +40,15 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
     uint32_t startMs = millis();
 
     while (seq < config.exchanges) {
+        // Any input means the host has given up on this point (Device.resync()); stop, and let the
+        // command loop answer it. Checked here, between attempts and outside every timed region,
+        // so it costs the measurement nothing. Without it a point that overran its timeout kept
+        // retrying for up to 5 x replywait per exchange - 14 minutes at SF12 - while the host's
+        // next commands sat unread in the serial buffer.
+        if (Serial.available() > 0) {
+            break;
+        }
+
         // Pacing floor between attempts, fresh or retry. Not the exchange rate: LoRa's
         // time-on-air and Zigbee's status wait both exceed it comfortably.
         if (lastAttemptMs != 0 && millis() - lastAttemptMs < config.spacingMs) {

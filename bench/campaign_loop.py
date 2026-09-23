@@ -75,12 +75,12 @@ def run_schedule(runner, schedule, already_done, started, log=_flushing_print):
 
 
 def _resync(runner, log):
-    """Let both boards finish whatever they are still doing before the next CFG goes out."""
+    """Stop whatever either board is still doing before the next CFG goes out."""
     # In field mode there is no gateway on USB; its lease expiry does the resynchronising.
     for board in (b for b in (runner.gateway, runner.node) if b is not None):
         try:
             if board.resync():
-                log(f"    {board.name} finished late; stream resynchronised")
+                log(f"    {board.name} was still mid-point; stopped it and resynchronised")
         except Exception as resync_exc:       # noqa: BLE001 - best effort by design
             log(f"    {board.name} resync failed: {resync_exc}")
 

@@ -37,7 +37,8 @@ class CampaignRunner:
     """Executes a schedule against the two boards, streaming results to disk as it goes."""
 
     def __init__(self, gateway, node, gateway_peer, node_peer, out_dir, writer, status_path,
-                 log=print, power=None, settle_s=SETTLE_SECONDS, capture_rssi=False):
+                 log=print, power=None, settle_s=SETTLE_SECONDS, capture_rssi=False,
+                 airtime_ledger=None):
         # Campaign-wide rather than per-point, because it is not a swept factor: capturing signal
         # quality costs a promiscuous sniffer on ESP-NOW and a UART round trip on Zigbee, so a run
         # with it on is a different experiment from one without, not another point in the same one.
@@ -55,7 +56,8 @@ class CampaignRunner:
         self.writer = writer
         self.status_path = status_path
         self.log = log
-        self.airtime = AirtimeBudget()
+        # Persisted across runs when given a path; see AirtimeBudget.
+        self.airtime = AirtimeBudget(path=airtime_ledger)
         self.settle_s = settle_s
         self._last_tech = None
         self.completed = 0

@@ -192,34 +192,35 @@ class Device:
         _, records = self._read_until(("RDY", "ERR,"), timeout_s or (duration_ms / 1000.0 + 30))
         return records
 
-    def resync(self, timeout_s=300.0):
-        """Wait for a board that is still working to go quiet, after a command gave up on it.
+    def resync(self, timeout_s=60.0):
+        """Stop a board that is still working after a command gave up on it, and wait until it
+        is back in its command loop.
 
-        A run that overruns its timeout has not stopped - the firmware retries every exchange up to
-        five times, so the board can still be grinding for minutes after the host stopped listening.
-        Sending the next CFG into that stream gets no ACK, and the point after it fails for a reason
-        that has nothing to do with its own configuration. That is how one marginal point used to
-        take the next six down with it.
+        A run that overruns its timeout has not stopped: the firmware retries every exchange up to
+        five times, so without this the board keeps going for minutes and every command sent in
+        the meantime sits unread. Waiting for silence is not enough - at SF12 the board is quiet
+        for ~8 s between attempts, and a 1.5 s quiet check once let a field campaign carry on
+        while the node was still mid-point.
 
-        Returns True if the board reported RDY (it finished on its own), False if it simply fell
-        silent. Either way the stream is clean enough for the next CFG.
+        Any input makes the measured loop stop between attempts (BenchRunner.cpp), so this sends
+        PING and waits for the PONG, which can only come from the command loop. Returns True if the
+        board reported RDY on the way, i.e. it had still been running a point.
         """
+        self._serial.reset_input_buffer()
+        self._write("PING")
         deadline = time.time() + timeout_s
-        quiet_needed = 1.5
-        last_seen = time.time()
         finished = False
         while time.time() < deadline:
             raw = self._serial.readline()
-            if raw:
-                last_seen = time.time()
-                if "RDY" in raw.decode(errors="replace"):
-                    finished = True
-                    break
+            if not raw:
                 continue
-            if time.time() - last_seen > quiet_needed:
-                break
-        self._serial.reset_input_buffer()
-        return finished
+            line = raw.decode(errors="replace")
+            if "RDY" in line:
+                finished = True
+            if "PONG," in line:
+                self._serial.reset_input_buffer()
+                return finished
+        raise DeviceError(f"{self.name}: no answer to PING within {timeout_s:.0f}s of resync")
 
     def drain(self, seconds=0.3):
         """Collect whatever the board has emitted since the last read - the node's PPN/PPM

@@ -13,6 +13,7 @@ of the happy path. A failure then means the point really failed, not that the ho
 
 import time
 from collections import deque
+from pathlib import Path
 
 # ETSI EN 300 220-2 / ERC-REC 70-03 h1.3 - see docs/regulations.md.
 DUTY_CYCLE_FRACTION = 0.10
@@ -27,14 +28,43 @@ RUN_TIMEOUT_CAP_S = 300
 
 
 class AirtimeBudget:
-    """Rolling-window airtime ledger, in the host, spanning the whole campaign."""
+    """Rolling-window airtime ledger, in the host, spanning the whole campaign - and, given a
+    `path`, the runs before it.
 
-    def __init__(self, fraction=DUTY_CYCLE_FRACTION, window_s=DUTY_CYCLE_WINDOW_S):
+    The window is an hour and the radios don't forget between runs, so neither may the ledger. A
+    field campaign started 16 minutes after an earlier one began with an empty ledger, and the
+    field gateway - whose own ledger spans its uptime - refused 34 of 40 SF12 replies because the
+    earlier run's airtime was still in its window. With a path, every entry is appended to a file
+    and the ones still inside the window are loaded back at start.
+    """
+
+    def __init__(self, fraction=DUTY_CYCLE_FRACTION, window_s=DUTY_CYCLE_WINDOW_S, path=None):
         self.fraction = fraction
         self.window_s = window_s
         self.limit_s = fraction * window_s
         self._entries = deque()   # (timestamp, seconds)
         self.total_s = 0.0
+        self._path = Path(path) if path else None
+        if self._path:
+            self._load()
+
+    def _load(self):
+        """Keep what is still inside the window, and rewrite the file with only that."""
+        now = time.time()
+        if self._path.exists():
+            for line in self._path.read_text().splitlines():
+                try:
+                    at, seconds = (float(x) for x in line.split())
+                except ValueError:
+                    continue
+                if now - at <= self.window_s:
+                    self._entries.append((at, seconds))
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text("".join(f"{at:.3f} {s:.3f}\n" for at, s in self._entries))
+
+    def carried_over(self):
+        """Airtime from earlier runs that is still inside the window at start."""
+        return sum(seconds for _, seconds in self._entries) - self.total_s
 
     def _prune(self, now):
         while self._entries and now - self._entries[0][0] > self.window_s:
@@ -48,8 +78,12 @@ class AirtimeBudget:
     def record(self, seconds):
         if seconds <= 0:
             return
-        self._entries.append((time.time(), seconds))
+        at = time.time()
+        self._entries.append((at, seconds))
         self.total_s += seconds
+        if self._path:
+            with self._path.open("a") as handle:
+                handle.write(f"{at:.3f} {seconds:.3f}\n")
 
     def wait_for(self, seconds, sleeper=time.sleep):
         """Block until `seconds` of additional airtime would fit inside the window.
@@ -93,6 +127,6 @@ def run_timeout(module, point, params):
     # Capped, because the true worst case is 18 minutes for ESP-NOW and 35 for Zigbee - both of
     # which are only reached when every single exchange fails five times, i.e. when the link is
     # dead and waiting longer tells you nothing you do not already know. Giving up early is safe
-    # now that a failure is followed by resync(): the board is left to finish in its own time and
-    # the next point starts against a clean stream rather than a busy one.
+    # now that a failure is followed by resync(): the board is stopped between attempts and the
+    # next point starts against a clean stream rather than a busy one.
     return max(optimistic_s, min(worst_case_s + 30, RUN_TIMEOUT_CAP_S))
