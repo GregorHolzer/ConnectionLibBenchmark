@@ -64,7 +64,6 @@ void applyKeyValue(BenchConfig &config, const char *key, const char *value) {
 }
 
 void handleConfigure(char *args) {
-    State &s = state();
     BenchConfig config;   // start from defaults every time: a CFG is a complete specification,
                           // never a delta on the previous point
     for (char *token = strtok(args, " \t"); token != nullptr; token = strtok(nullptr, " \t")) {
@@ -76,9 +75,16 @@ void handleConfigure(char *args) {
         applyKeyValue(config, token, equals + 1);
     }
 
+    applyConfiguration(config, true);
+}
+
+bool applyConfiguration(const BenchConfig &config, bool announce) {
+    State &s = state();
     if (const char *reason = checkConformance(config)) {
-        Serial.printf("ERR,%s\n", reason);
-        return;
+        if (announce) {
+            Serial.printf("ERR,%s\n", reason);
+        }
+        return false;
     }
 
     // Tear the old transport down before building the new one: EspNowTransport routes its C
@@ -90,20 +96,25 @@ void handleConfigure(char *args) {
     if (config.tech != Tech::None) {
         s.transport = buildTransport(config);
         if (!s.transport || !s.transport->setup()) {
-            Serial.printf("ERR,transport setup failed (code %d)\n",
-                           s.transport ? s.transport->lastErrorCode() : -1);
+            if (announce) {
+                Serial.printf("ERR,transport setup failed (code %d)\n",
+                               s.transport ? s.transport->lastErrorCode() : -1);
+            }
             s.transport.reset();
             s.configured = false;
             showStatus("setup FAILED");
-            return;
+            return false;
         }
     }
 
     resetNodeCounters();
     s.configured = true;
-    emitRunHeader();
-    Serial.println("ACK");
+    if (announce) {
+        emitRunHeader();
+        Serial.println("ACK");
+    }
     showStatus("ready");
+    return true;
 }
 
 void handleRun() {

@@ -6,6 +6,7 @@
 
 #include "BenchPower.hpp"
 #include "BenchState.hpp"
+#include "FieldGateway.hpp"
 
 namespace bench {
 
@@ -95,6 +96,9 @@ void emitInfo() {
     Serial.printf("INFO,freeHeap,%lu\n", static_cast<unsigned long>(ESP.getFreeHeap()));
     Serial.printf("INFO,pointsRun,%lu\n", static_cast<unsigned long>(state().pointsRun));
     emitRailState();
+#if defined(BENCH_FIELD_GATEWAY)
+    Serial.printf("INFO,fieldLogBytes,%lu\n", field::logBytes());
+#endif
     Serial.println("INFO,end,ok");
 }
 

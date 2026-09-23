@@ -5,6 +5,10 @@
     ./run_campaign.py --preset standard   # ~3 h
     ./run_campaign.py --preset full       # ~10 h, the one that produces reliability data
     ./run_campaign.py --resume results/campaign-20260918-1200
+    ./run_campaign.py --field --site "2 km, ridge" --gateway-mac aa:bb:cc:dd:ee:ff
+
+`--field` is the field campaign of docs/field-campaign.md: only the node is attached, and the
+gateway - flashed and deployed with tools/field_gateway.py - is leased over the air per point.
 
 The campaign flashes both boards **once** and then drives everything over the serial command
 protocol, so almost all of the wall clock is spent measuring rather than rebuilding.
@@ -22,8 +26,10 @@ Two design points worth knowing before changing anything here:
 
 import argparse
 import json
+import secrets
 import sys
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -33,12 +39,13 @@ from bench import technologies
 from bench.bringup import resolve_ports, start_power
 from bench.campaign import CampaignRunner
 from bench.campaign_loop import run_schedule
+from bench.field import FieldCampaignRunner, lease_request_airtime_s
 from bench.schedule import PRESETS, allocate, build_schedule
 from bench.device import Device
-from bench.ports import ensure_pyserial, flash, read_mac_for_port
+from bench.ports import detect_ports, ensure_pyserial, flash, read_mac_for_port, wait_for_port
 from bench.power import DEFAULT_VOLTAGE_MV
 from bench.results import ResultWriter, write_meta
-from bench.util import DEFAULT_ZIGBEE_PEER, format_duration, git_sha
+from bench.util import COORDINATOR_ZIGBEE_PEER, DEFAULT_ZIGBEE_PEER, format_duration, git_sha
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -56,7 +63,16 @@ def main():
     parser.add_argument("--techs", nargs="+", default=technologies.ALL, choices=technologies.ALL)
     parser.add_argument("--gateway-port")
     parser.add_argument("--node-port")
-    parser.add_argument("--zigbee-peer", default=DEFAULT_ZIGBEE_PEER)
+    parser.add_argument("--zigbee-peer",
+                        help=f"the peer's XBee 64-bit address (default: {DEFAULT_ZIGBEE_PEER}, the "
+                             f"bench node; with --field, {COORDINATOR_ZIGBEE_PEER}, the coordinator)")
+    parser.add_argument("--field", action="store_true",
+                        help="field campaign: only the node is attached, and the gateway is leased "
+                             "over the air (docs/field-campaign.md)")
+    parser.add_argument("--gateway-mac",
+                        help="with --field: the field gateway's MAC, for ESP-NOW. "
+                             "tools/field_gateway.py prints it when it flashes the gateway")
+    parser.add_argument("--site", help="with --field: where the node is, recorded in meta.json")
     parser.add_argument("--pio", default="pio")
     parser.add_argument("--out", help="results directory (default: results/campaign-<timestamp>)")
     parser.add_argument("--resume", help="continue an existing campaign directory")
@@ -83,6 +99,11 @@ def main():
                          help="name of an earlier campaign this one should be compared against "
                               "(e.g. a pre-strip run, to show the strip changed only power)")
     args = parser.parse_args()
+    if args.zigbee_peer is None:
+        args.zigbee_peer = COORDINATOR_ZIGBEE_PEER if args.field else DEFAULT_ZIGBEE_PEER
+    if args.field and "espnow" in args.techs and not args.gateway_mac:
+        parser.error("--field with ESP-NOW needs --gateway-mac; "
+                     "tools/field_gateway.py mac prints it")
 
     # Before any output: this may re-exec under PlatformIO's interpreter, and on a terminal
     # (line-buffered) anything already printed would then appear twice.
@@ -112,6 +133,13 @@ def main():
         print(f"  {tech:<8} {entry['points']:>3} points x {entry['repetitions']:>2} repetitions"
               f"  ({format_duration(entry['estimated_total_s'])}{note})")
     print(f"  estimated total: {format_duration(total_estimate)}")
+    if args.field:
+        # Every point, of every technology, starts with a lease request on SF12. The runner paces
+        # it against the duty cycle; the allocation above doesn't know about it.
+        control_s = lease_request_airtime_s() * sum(plan[t]["points"] * plan[t]["repetitions"]
+                                                    for t in args.techs)
+        print(f"  plus field control: {control_s:.0f}s of SF12 airtime "
+              f"-> up to {format_duration(control_s / 0.10)} more at the duty-cycle floor")
 
     schedule = build_schedule(plan, args.techs)
     print(f"  {len(schedule)} configuration points scheduled")
@@ -131,30 +159,50 @@ def main():
     # Rail first, then the boards: see bench/bringup.py for why that order is forced. The monitor
     # has to span the whole campaign, because DUT power drops when its session closes.
     power = start_power(args, out_dir / "power_traces")
-    gw_port, node_port = resolve_ports(args)
-    print(f"\ngateway {gw_port}\nnode    {node_port}")
+    if args.field:
+        gw_port, node_port = None, resolve_node_port(args)
+        print(f"\nnode    {node_port}   (gateway: in the field, over the air)")
+    else:
+        gw_port, node_port = resolve_ports(args)
+        print(f"\ngateway {gw_port}\nnode    {node_port}")
 
     # Two flashes for the entire campaign. Everything after this is runtime configuration.
     if not args.skip_flash:
         print("\nflashing (once for the whole campaign)...")
-        flash(args.pio, "bench_node", node_port)
-        flash(args.pio, "bench_gateway", gw_port)
+        if args.field:
+            flash(args.pio, "field_node", node_port)
+        else:
+            flash(args.pio, "bench_node", node_port)
+            flash(args.pio, "bench_gateway", gw_port)
 
-    peer = {"mac": read_mac_for_port(node_port, args.pio), "xbee64": args.zigbee_peer}
-    gateway_mac = read_mac_for_port(gw_port, args.pio)
-    print(f"peer MAC for the gateway to target: {peer['mac']}")
+    if args.field:
+        # The node's peer is the field gateway; its MAC was read when it was flashed.
+        peer = {"mac": args.gateway_mac or "00:00:00:00:00:00", "xbee64": args.zigbee_peer}
+        gateway_mac = args.gateway_mac
+        field = _field_meta(args, out_dir)
+        print(f"field campaign {field['campaign_id']}, gateway MAC {gateway_mac}")
+    else:
+        peer = {"mac": read_mac_for_port(node_port, args.pio), "xbee64": args.zigbee_peer}
+        gateway_mac = read_mac_for_port(gw_port, args.pio)
+        field = None
+        print(f"peer MAC for the gateway to target: {peer['mac']}")
 
     writer = ResultWriter(out_dir)
     already_done = writer.completed_indices() if args.resume else set()
     if already_done:
         print(f"resuming: {len(already_done)} of {len(schedule)} points already recorded")
 
-    with Device(gw_port, name="gw") as gateway, Device(node_port, name="node") as node:
+    gateway_session = nullcontext() if args.field else Device(gw_port, name="gw")
+    with gateway_session as gateway, Device(node_port, name="node") as node:
         # The node needs the *gateway's* MAC as its ESP-NOW peer, and vice versa.
         node_peer = {"mac": gateway_mac, "xbee64": args.zigbee_peer}
 
-        print(f"gateway says: {gateway.ping()}   node says: {node.ping()}")
-        device_info = {"gateway": gateway.info(), "node": node.info()}
+        if gateway:
+            print(f"gateway says: {gateway.ping()}   node says: {node.ping()}")
+            device_info = {"gateway": gateway.info(), "node": node.info()}
+        else:
+            print(f"node says: {node.ping()}")
+            device_info = {"node": node.info()}
 
         # `power` was started above, before the boards were touched. The metadata below still
         # records whether energy was actually being captured rather than whether it was asked for.
@@ -178,6 +226,10 @@ def main():
             # round trip per receive), so a campaign recorded with it on measures a different
             # system from one recorded without.
             "rssi_capture": bool(args.rssi),
+            # The other fact that decides pooling: a field campaign has different roles (the
+            # metered board initiates), a different environment and a different control path.
+            "control_mode": "lease" if args.field else "serial",
+            "field": field,
             "benchmark_git_sha": git_sha(REPO_ROOT),
             "connectionlib_git_sha": git_sha(REPO_ROOT / "ConnectionLib"),
             # Practice P14: record the full configuration space, not only what was reached.
@@ -188,8 +240,13 @@ def main():
             },
         })
 
-        runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
-                                 out_dir / "status.json", power=power, capture_rssi=args.rssi)
+        if args.field:
+            runner = FieldCampaignRunner(node, peer, int(field["campaign_id"], 16), out_dir,
+                                         writer, out_dir / "status.json", power=power,
+                                         capture_rssi=args.rssi)
+        else:
+            runner = CampaignRunner(gateway, node, peer, node_peer, out_dir, writer,
+                                     out_dir / "status.json", power=power, capture_rssi=args.rssi)
         started = time.time()
         interrupted = run_schedule(runner, schedule, already_done, started)
 
@@ -208,6 +265,10 @@ def main():
         meta["power_samples_total"] = power.total_samples
     meta["duty_wait_total_s"] = round(runner.duty_wait_total_s, 1)
     meta["interrupted"] = interrupted
+    if args.field:
+        meta["field"]["lease_retries"] = runner.lease_retries
+        meta["field"]["unreleased"] = runner.unreleased
+        meta["field"]["expiry_wait_total_s"] = round(runner.expiry_wait_total_s, 1)
     write_meta(out_dir, meta)
 
     verb = "stopped after" if interrupted else "finished in"
@@ -223,9 +284,42 @@ def main():
         # is a complete pass over all three technologies, so stopping early costs repetitions
         # rather than coverage.
         print(f"\nresume where this left off:\n  ./run_campaign.py --resume {out_dir}")
+    if args.field:
+        print(f"\nonce the gateway is collected, bring its node->gateway arrivals in:"
+              f"\n  tools/field_gateway.py fetch --results {out_dir}")
     print(f"\nanalyse what you have:\n  ./verify_practices.py --results {out_dir}"
           f"\n  ./plot_results.py --results {out_dir}")
     return 130 if interrupted else (1 if runner.failures else 0)
+
+
+def resolve_node_port(args):
+    """The one attached board, in field mode."""
+    if args.node_port:
+        port = args.node_port
+    else:
+        detected = detect_ports(args.pio, expect=1, timeout_s=20.0)
+        if len(detected) != 1:
+            sys.exit(f"--field expects exactly 1 serial device, found {len(detected)}: {detected}")
+        port = detected[0]
+    if not wait_for_port(port):
+        sys.exit(f"{port} never appeared — is the PPK2 powering the node?")
+    return port
+
+
+def _field_meta(args, out_dir):
+    """The field block of meta.json. A resumed campaign keeps its campaign id, or the gateway's
+    log records from before the resume would no longer match it."""
+    meta_path = out_dir / "meta.json"
+    previous = json.loads(meta_path.read_text()).get("field") if meta_path.exists() else None
+    return {
+        "campaign_id": previous["campaign_id"] if previous else f"{secrets.randbits(32):08x}",
+        "site": args.site if args.site is not None else (previous or {}).get("site"),
+        "gateway_mac": args.gateway_mac,
+        "gateway_xbee64": args.zigbee_peer,
+        # Mirrors src/FieldProtocol.hpp homeConfig().
+        "home": {"tech": "lora", "freq": 433.2, "bw": 125, "sf": 12, "cr": 8, "pwr": 7,
+                 "preamble": 8},
+    }
 
 
 if __name__ == "__main__":

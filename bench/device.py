@@ -20,7 +20,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Records the firmware emits. Matched on prefix because the Zigbee log interleaves raw XBee API
 # frame bytes with the text, so a line is not guaranteed to start where the record does.
-RECORD_PREFIXES = ("PPH,", "PPD,", "PPS,", "PPN,", "PPM,", "PPI,", "INFO,")
+# RELEASE before LEASE: prefixes are found anywhere in the line, and "RELEASE,ok" contains "LEASE,".
+RECORD_PREFIXES = ("PPH,", "PPD,", "PPS,", "PPN,", "PPM,", "PPI,", "INFO,",
+                   "RELEASE,", "LEASE,", "FLB,", "FLP,")
+
+
+class LeaseNoAck(DeviceError):
+    """The field gateway did not ack a lease over home.
+
+    Kept apart from other errors because it is ambiguous in a way the host has to handle: either
+    the request was lost, and the gateway is still on home, or only the ack was, and the gateway has
+    switched to the point and won't hear home again until its lease runs out.
+    """
 
 
 class Device:
@@ -121,6 +132,49 @@ class Device:
             if len(parts) == 3 and parts[0] == "PPH":
                 header[parts[1]] = parts[2]
         return header
+
+    def lease(self, params, campaign_id, point_id, lease_s, timeout_s=30.0):
+        """Field node only: lease the field gateway for one point, then configure this board.
+
+        Returns (header, home) - the PPH header, as configure() returns it, and the signal quality
+        of the gateway's ack over home. Raises LeaseNoAck when no ack came back, DeviceError for
+        anything else.
+        """
+        args = " ".join(f"{k}={v}" for k, v in params.items())
+        self._serial.reset_input_buffer()
+        self._write(f"LEASE cid={campaign_id:08x} pt={point_id} lease={int(lease_s)} {args}")
+        line, records = self._read_until(("ACK", "ERR,"), timeout_s)
+        if line.startswith("ERR"):
+            error = LeaseNoAck if "noack" in line else DeviceError
+            raise error(f"{self.name}: {line}")
+        header, home = {}, {}
+        for record in records:
+            parts = record.split(",")
+            if parts[0] == "PPH" and len(parts) >= 3:
+                header[parts[1]] = ",".join(parts[2:])
+            elif parts[0] == "LEASE" and len(parts) >= 4:
+                home = {"rssi_dbm": float(parts[2]) if parts[2] else None,
+                        "snr_db": float(parts[3]) if parts[3] else None}
+        return header, home
+
+    def release(self, timeout_s=60.0):
+        """Field node only: send the field gateway back to home. True if it acknowledged."""
+        self._write("RELEASE")
+        _, records = self._read_until(("RDY",), timeout_s)
+        return "RELEASE,ok" in records
+
+    def read_log(self, timeout_s=120.0):
+        """Field gateway only: every record in its flash log."""
+        self._serial.reset_input_buffer()
+        self._write("LOG")
+        _, records = self._read_until(("LOG,end,",), timeout_s)
+        return [r for r in records if r.startswith(("FLB,", "FLP,"))]
+
+    def clear_log(self, timeout_s=10.0):
+        """Field gateway only: delete its flash log."""
+        self._serial.reset_input_buffer()
+        self._write("LOGCLEAR")
+        self._read_until(("ACK",), timeout_s, collect=False)
 
     def run(self, timeout_s):
         """Gateway only: run the configured point to completion. Returns the raw records."""

@@ -47,6 +47,10 @@ void resetSeen();
 /** @brief Record a sequence number; false if it had already arrived. */
 bool markSeen(uint16_t seq);
 
+/** @brief The distinct-arrival bitmap, bit `seq % 32` of word `seq / 32`. */
+const uint32_t *seenBitmap();
+size_t seenBitmapWords();
+
 void buildMessage(uint8_t *buf, size_t len, char kind, uint16_t seq);
 
 uint16_t sequenceOf(const std::vector<uint8_t> &payload);

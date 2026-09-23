@@ -10,7 +10,11 @@ State &state() {
 }
 
 const char *role() {
-#if defined(BENCH_ROLE_GATEWAY)
+#if defined(BENCH_FIELD_GATEWAY)
+    return "field-gateway";
+#elif defined(BENCH_FIELD_NODE)
+    return "field-node";
+#elif defined(BENCH_ROLE_GATEWAY)
     return "gateway";
 #else
     return "node";

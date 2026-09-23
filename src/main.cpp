@@ -14,8 +14,12 @@
 //   IDLE <ms>                -> PPI,... RDY               standing-cost hold, no exchanges
 //   RFCHECK [RFO]            -> RF,... RDY                433 MHz noise floor + PA diagnostic
 //   RESET                    -> ACK                       clears node-side counters
+//   LEASE ... / RELEASE      -> see FieldNode.hpp          field node only
+//   LOG / LOGCLEAR           -> see FieldGateway.hpp       field gateway only
 //
 // The host configures the node first and the gateway second, and both must ACK before RUN.
+// In field mode (docs/field-campaign.md) there is no host at the gateway: the field node reaches it
+// over the air with LEASE, and the field gateway's USB port is only used to read its log back.
 //
 // This file is only the dispatcher and the two Arduino entry points. The verbs live in
 // BenchCommands.cpp, the diagnostic in RfCheck.cpp, and what the board reports about itself in
@@ -32,6 +36,8 @@
 #include "BenchReporting.hpp"
 #include "BenchRunner.hpp"
 #include "BenchState.hpp"
+#include "FieldGateway.hpp"
+#include "FieldNode.hpp"
 #include "RfCheck.hpp"
 
 using bench::Tech;
@@ -45,6 +51,34 @@ void handleLine(char *line) {
     if (*line == '\0') {
         return;
     }
+
+#if defined(BENCH_FIELD_GATEWAY)
+    // Configured over the air only. A CFG arriving here would bypass the lease and leave the
+    // gateway somewhere the node doesn't know about.
+    if (strcmp(line, "PING") == 0) {
+        Serial.printf("PONG,%s\n", bench::role());
+    } else if (strcmp(line, "INFO") == 0) {
+        bench::emitInfo();
+    } else if (strcmp(line, "LOG") == 0) {
+        bench::field::handleLogDump();
+    } else if (strcmp(line, "LOGCLEAR") == 0) {
+        bench::field::handleLogClear();
+    } else {
+        Serial.println("ERR,the field gateway takes only PING, INFO, LOG and LOGCLEAR");
+    }
+    return;
+#endif
+
+#if defined(BENCH_FIELD_NODE)
+    if (strncmp(line, "LEASE", 5) == 0) {
+        bench::field::handleLease(line + 5);
+        return;
+    }
+    if (strcmp(line, "RELEASE") == 0) {
+        bench::field::handleRelease();
+        return;
+    }
+#endif
 
     if (strncmp(line, "CFG", 3) == 0) {
         bench::handleConfigure(line + 3);
@@ -80,6 +114,10 @@ void setup() {
     bench::setupDisplay();
     bench::showStatus("idle");
 
+#if defined(BENCH_FIELD_GATEWAY)
+    bench::field::gatewaySetup();
+#endif
+
     Serial.printf("BENCH,%s,ready\n", bench::role());
 }
 
@@ -100,7 +138,9 @@ void loop() {
         }
     }
 
-#if defined(BENCH_ROLE_NODE)
+#if defined(BENCH_FIELD_GATEWAY)
+    bench::field::gatewayTick();
+#elif defined(BENCH_ROLE_NODE)
     // The node has no RUN step: once configured it answers whatever arrives, for as long as the
     // gateway keeps sending. Serial is still serviced above, so a new CFG lands between polls.
     bench::State &s = bench::state();

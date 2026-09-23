@@ -49,7 +49,7 @@ class ResultWriter:
         return done
 
     def write_point(self, run, header, exchanges, summary, node_rx, node_summary, started_at,
-                    energy=None):
+                    energy=None, extra=None):
         point = run.point
         prefix = [run.index, run.rotation, point.tech, point.factor, point.level, point.key]
 
@@ -73,7 +73,7 @@ class ResultWriter:
 
         # One JSON line per configuration point: the inputs recorded with the outputs, which is
         # what practice P14 (benchmark coverage) needs to be checkable after the fact.
-        self._points_file.write(json.dumps({
+        record = {
             "run_index": run.index,
             "rotation": run.rotation,
             "tech": point.tech,
@@ -89,7 +89,10 @@ class ResultWriter:
             "energy": energy,
             "exchange_count": len(exchanges),
             "node_rx_count": len(node_rx),
-        }) + "\n")
+        }
+        # Mode-specific facts, e.g. the field runner's lease outcome.
+        record.update(extra or {})
+        self._points_file.write(json.dumps(record) + "\n")
 
         self._raw_file.flush()
         self._node_file.flush()

@@ -1,9 +1,23 @@
 # Field campaign
 
 How the benchmark runs when the two boards are up to 4 km apart and only one of them can have a
-computer attached. **This is the design; none of it is implemented yet.** Every serial
-`CFG`/`RUN` path the bench uses stays as it is. Field mode is added alongside it, not in place
-of it.
+computer attached. Every serial `CFG`/`RUN` path the bench uses stays as it is. Field mode is added
+alongside it, as two more builds (`field_node`, `field_gateway`) and `run_campaign.py --field`, and
+the bench builds compile none of it.
+
+**Not yet run on hardware.** The protocol, the host's lease handling and the log reconstruction are
+tested off-board; the first real run should be a short one with both boards on the desk.
+
+## Running one
+
+1. **Before deployment**, with the coordinator board on USB:
+   `tools/field_gateway.py flash`. It prints the gateway's MAC, which ESP-NOW needs.
+   `tools/field_gateway.py status` confirms the firmware and shows the log size.
+2. **In the field**, with only the node on USB and the PPK2 metering it:
+   `./run_campaign.py --field --site "1 km, ridge" --gateway-mac <mac>`. One campaign per site.
+3. **After collection**, with the gateway on USB:
+   `tools/field_gateway.py fetch --results results/<campaign>` for each campaign, then
+   `tools/field_gateway.py clear --yes` once all of them are fetched.
 
 ## Topology
 
@@ -27,17 +41,27 @@ A LoRa radio receives on one SF/BW at a time, and ESP-NOW on one channel. So the
 to be told which point comes next, and a failed point must not be able to strand it on a
 configuration the node can no longer reach.
 
-- **Home configuration.** A fixed, most-robust point per technology: for LoRa SF12, 125 kHz,
-  10 mW, the slowest point in the [regulations.md](regulations.md) envelope. The gateway boots
-  into it and always falls back to it.
-- **Lease.** The node sends `CFG(point_id, params, lease_s)` over home. The gateway ACKs over
-  home, switches, answers for the length of the lease, and **goes back to home when the lease
-  expires, whether the point worked or not.**
-- **Lost ACK.** The node can't tell a lost `CFG` from a lost ACK. Either way it waits
-  `lease + guard` and retries: by then the gateway is back on home. `point_id` is idempotent, so
-  a repeated `CFG` does no harm.
-- **Reboot or hang.** The gateway boots into home. With the task watchdog enabled, a wedged
-  gateway costs one point, not the campaign.
+- **Home configuration.** One fixed LoRa point: SF12, 125 kHz, CR 4/8, 7 dBm, the slowest point in
+  the [regulations.md](regulations.md) envelope (`homeConfig()` in `src/FieldProtocol.cpp`). The
+  gateway boots into it and always falls back to it. Home carries control for **every**
+  technology, ESP-NOW and Zigbee points included: LoRa outranges both, so one home is enough, and
+  the gateway only ever has one transport up at a time.
+- **Lease.** For each point the host sends the node a `LEASE`, which transmits the point's radio
+  settings, the point id and a lease length to the gateway over home as a 35-byte binary frame.
+  The gateway acks over home, switches, and answers pings on the point's configuration. The lease
+  is the host's run timeout plus 30 s.
+- **Release.** Once `RUN` finishes, the node sends a release on the point's configuration, and the
+  gateway acks it and goes straight back to home. Without it every point would cost its full
+  worst-case lease.
+- **Expiry.** If the release is lost, or the point failed, the gateway **goes back to home when the
+  lease runs out, whether the point worked or not.** The host doesn't send the next lease until
+  then.
+- **Lost ack.** The node can't tell a lost request from a lost ack. The host retries at once, which
+  covers a lost request, and if that fails too it waits out the lease that may be running and
+  tries a third time. Three failures mark the point failed; it isn't recorded, so `--resume`
+  retries it. A repeated request for the same point does no harm.
+- **Reboot or hang.** The gateway boots into home. The task watchdog (60 s) turns a hang into a
+  reboot, so a wedged gateway costs one point, not the campaign.
 
 The command never travels over the configuration being swept, only over home. If home fails at a
 given distance, no swept point would have worked either: that distance is out of range, which is
@@ -55,9 +79,13 @@ receiver, per direction, and no host sits at the gateway. Without a record kept 
 round-trip loss can't be split into the two directions. RTT, `send_us` and gateway→node arrivals
 are all measured on the node and reach the laptop as they do today.
 
-The gateway therefore writes **one record per point to LittleFS on its internal flash**:
-`point_id`, a bitmap of received sequence numbers, and boot/lease events. The log is read out
-over USB when the gateway is collected.
+The gateway therefore writes **one record per lease to LittleFS on its internal flash**: campaign
+id, point id, how the lease ended (released, expired, superseded, setup failed), the counters, and a
+bitmap of the sequence numbers that arrived. It also writes one record per boot, with the reset
+reason. `tools/field_gateway.py fetch` reads the log out and rewrites `node_rx.csv` from it,
+which is the file the bench fills live, so the analysis counts node→gateway delivery the same way
+in both. It also writes `gateway_leases.csv` and flags any reboots during the campaign. A point
+leased twice gets the union of its leases' arrivals.
 
 - **Not RAM.** A reboot or brownout loses it, and those are exactly the events a field log has to
   survive.
@@ -76,20 +104,30 @@ mostly repeat the node's own reading, at the cost of a payload change. RSSI and 
 comparison axis in any case ([metrics.md](metrics.md), signal quality section). The node keeps
 LoRa RSSI/SNR, which it records at no cost.
 
+One reading comes for free from the control path: every point records the RSSI and SNR of the
+gateway's lease ack in `points.jsonl` (`field.home_rssi_dbm`, `field.home_snr_db`). It is the same
+SF12 link at every point, so across a campaign it shows how the site's link margin moved.
+
 ## Duty cycle
 
 The gateway only transmits in reply to the node, so the host's pacing of the node also limits the
-gateway's airtime. Control traffic counts toward the budget as well: a `CFG` and its ACK at SF12
-take a few seconds of airtime per point. The on-device `DutyCycleGuard` is the gateway's only
-safety net, because no host watches it. Today the firmware rebuilds the guard with every
-`Transport`, which throws its ledger away on each `CFG`. Field mode needs the guard to survive
-that rebuild.
+gateway's airtime. Control traffic counts too, and it isn't small: a lease request is **3.0 s** of
+SF12 airtime and its ack 1.45 s, on every point of every technology. The host charges each
+request, and the release frames of LoRa points, against its ledger, and prints the extra
+duty-cycle time in the plan, which the allocation itself doesn't include.
+
+No host watches the gateway, and `LoRaTransport`'s own `DutyCycleGuard` is rebuilt with every
+`Transport`, forgetting its ledger at each lease boundary. So the gateway keeps its own ledger in
+the application, spanning its whole uptime: every LoRa transmission it makes, acks and pongs alike,
+goes through it, and a pong it can't afford is dropped and counted in the lease record rather than
+sent. ConnectionLib is unchanged.
 
 ## Scope
 
-- **4 km is LoRa only.** ESP-NOW and Zigbee reach a few hundred metres at most. Past that the node
-  gets no ACK on home, and the points are recorded as out of range. The three-technology
-  comparison is a short-range result.
+- **4 km is LoRa only.** ESP-NOW and Zigbee reach a few hundred metres at most. Their leases still
+  succeed, because control travels over LoRa, so past their range those points are recorded with
+  zero delivery, which is the result. If home itself is out of reach, every lease fails and nothing
+  is recorded: that site is beyond range. The three-technology comparison is a short-range result.
 - **Field data is a separate campaign.** `meta.json` records the control mode (serial or lease),
   and field data is never pooled with bench data: different environment, different roles, a
   different control path.

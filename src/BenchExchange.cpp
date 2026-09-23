@@ -43,6 +43,14 @@ bool markSeen(uint16_t seq) {
     return true;
 }
 
+const uint32_t *seenBitmap() {
+    return g_seqSeen;
+}
+
+size_t seenBitmapWords() {
+    return kSeqBitmapWords;
+}
+
 void buildMessage(uint8_t *buf, size_t len, char kind, uint16_t seq) {
     buf[0] = static_cast<uint8_t>(kind);
     buf[1] = static_cast<uint8_t>(seq & 0xFF);

@@ -39,6 +39,16 @@ void runGatewayPoint(connectionlib::Transport &transport, const connectionlib::A
  */
 void nodeTick(connectionlib::Transport &transport);
 
+/**
+ * @brief The two halves of nodeTick(), for a responder that decides in between whether to reply.
+ *
+ * countPing() records the arrival (distinct-sequence bitmap and the `PPN` line) and returns false
+ * for anything that is not a ping. replyToPing() sends the matching pong. The field gateway puts
+ * its own airtime ledger between them, since no host paces it.
+ */
+bool countPing(const connectionlib::ReceivedMessage &received);
+void replyToPing(connectionlib::Transport &transport, const connectionlib::ReceivedMessage &received);
+
 /** @brief Clear node-side counters. Called when a new configuration point is configured. */
 void resetNodeCounters();
 

@@ -19,6 +19,15 @@ void applyKeyValue(BenchConfig &config, const char *key, const char *value);
 /** @brief `CFG ...` - parse, validate, rebuild the transport, ACK or ERR. */
 void handleConfigure(char *args);
 
+/**
+ * @brief Validate a parsed config and rebuild the transport around it.
+ *
+ * The body of CFG, shared with the field mode's lease path. `announce` prints the PPH header and
+ * ACK/ERR for the host; the field gateway has no host, and the field node's LEASE builds its home
+ * transport silently so the only ACK the host reads is the one for the point itself.
+ */
+bool applyConfiguration(const BenchConfig &config, bool announce);
+
 /** @brief `RUN` - execute one configuration point. Gateway only. */
 void handleRun();
 
