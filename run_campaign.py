@@ -36,13 +36,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench import technologies
+from bench.board_session import BY_ID, KNOWN_BOARDS
 from bench.bringup import resolve_ports, start_power
 from bench.campaign import CampaignRunner
 from bench.campaign_loop import run_schedule
 from bench.field import FieldCampaignRunner, lease_request_airtime_s
 from bench.schedule import PRESETS, allocate, build_schedule
 from bench.device import Device
-from bench.ports import detect_ports, ensure_pyserial, flash, read_mac_for_port, wait_for_port
+from bench.ports import ensure_pyserial, flash, read_mac_for_port, wait_for_port
 from bench.power import DEFAULT_VOLTAGE_MV
 from bench.results import ResultWriter, write_meta
 from bench.util import COORDINATOR_ZIGBEE_PEER, DEFAULT_ZIGBEE_PEER, format_duration, git_sha
@@ -293,14 +294,16 @@ def main():
 
 
 def resolve_node_port(args):
-    """The one attached board, in field mode."""
+    """The node board, in field mode, found by its USB serial number.
+
+    Not "the one attached board": the field_node flash that follows would turn the coordinator
+    into a node if it happened to be the one on USB.
+    """
     if args.node_port:
         port = args.node_port
     else:
-        detected = detect_ports(args.pio, expect=1, timeout_s=20.0)
-        if len(detected) != 1:
-            sys.exit(f"--field expects exactly 1 serial device, found {len(detected)}: {detected}")
-        port = detected[0]
+        node_serial = next(s for s, role in KNOWN_BOARDS.items() if role == "node")
+        port = str(BY_ID / f"usb-1a86_USB_Single_Serial_{node_serial}-if00")
     if not wait_for_port(port):
         sys.exit(f"{port} never appeared — is the PPK2 powering the node?")
     return port
