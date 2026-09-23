@@ -1,6 +1,6 @@
 # Findings
 
-Measured state of the benchmark as of 2026-09-22. Every number here comes from a recorded campaign
+Measured state of the benchmark as of 2026-09-23. Every number here comes from a recorded campaign
 under `results/`; nothing is estimated unless it says so. Where a figure contradicts an earlier
 claim in this repo, the contradiction is stated rather than quietly corrected — a benchmark whose
 history is edited is worth less than one whose mistakes are legible.
@@ -14,6 +14,8 @@ Two campaigns are referenced throughout:
 | Duration | 1 h 54 m | partial |
 | Raw arm | absent (predates it) | ESP-NOW ×4, LoRa ×4 |
 | `rssi_capture` | false | false |
+
+§7 adds the first two field-mode runs, from 2026-09-23, both with the boards on the desk.
 
 ## 1. Cross-technology comparison
 
@@ -179,7 +181,55 @@ The full derivation is in ConnectionLib's `docs/measurement-methodology.md`. In 
 rejected because `becker2025`'s non-monotonic failures put the interesting behaviour in the lower
 tail.
 
-## 7. Open
+## 7. Field mode on the desk
+
+Field mode ([field-campaign.md](field-campaign.md)) had its first two runs on 2026-09-23, with
+both boards on the desk: the gateway board on plain USB and running field firmware, the node on
+the PPK2. Neither run measures range; they test the lease protocol against real radios.
+
+| | `campaign-20260923-111807` | `campaign-20260923-114800` |
+|---|---|---|
+| Plan | LoRa only, 22 points | all three, `full` preset (831 points) |
+| Outcome | 22 / 22, 14 m 24 s | stalled at point 44 (`lora/sf/12`); 44 recorded |
+| Leases | 20, one retried | 43 before the stall, three retried |
+| Releases the node saw acked | 19 of 20 | all 43 |
+| Gateway reboots | none | none |
+
+**The protocol works.** Every point recorded in either run delivered in full in both directions,
+and every gateway lease record matches a point: the first run's 400 node→gateway arrivals came
+back through the flash log and `fetch` exactly. Lease retries succeeded at once, as designed
+for a lost request. The lease ack on home arrived at −128 to −132 dBm, SNR −5.8 to −9 dB. That is
+the same weak desk link as §3, not a field-mode effect, and it is why `sf/7` needed 27 attempts
+for 20 exchanges in the first run: at SNR ≈ −7.5 dB it sits on SF7's demodulation floor.
+
+Three defects surfaced. All three are fixed:
+
+- **A lost release ack cost 250 s**, 29 % of the first run. On `sf/7` the node never saw the
+  gateway's release ack, but the gateway's log says `released`. The host still waited out the
+  whole lease. It now sends one lease at once after an unacknowledged release, and waits only if
+  that goes unanswered too.
+- **The host's duty-cycle ledger forgot earlier runs.** The second run started 16 minutes after
+  the first ended, with an empty ledger. At `sf/12` the gateway heard 40 pings and **answered 6,
+  dropping 34 on its own ledger**, which spans its uptime and still held the first run's airtime.
+  The gateway was right: reconstructed from both runs' points, the node transmitted about 563 s of
+  LoRa airtime in that hour against a 360 s limit. The host ledger is now persisted in
+  `results/lora_airtime_ledger.txt` and reloaded at start, for bench and field runs alike. The
+  gateway's ledger is what caught this, so it stays.
+- **A timed-out point kept running.** The node went on retrying `sf/12` after the host gave up,
+  up to 14 minutes at SF12. `resync()` took 1.5 s of silence as proof it had finished, but at SF12
+  the node is silent for ~8 s between attempts. Every later `LEASE` sat unread in its serial
+  buffer and timed out, and once the point ended a stale one would have run and been recorded
+  under the wrong point. The measured loop now stops on any host input, checked between attempts
+  and outside every timed region, and `resync()` sends `PING` and waits for the reply. This also
+  affects the bench gateway, which runs the same loop.
+
+A fourth defect showed up while the second run was being resumed. **`--resume` rebuilt the schedule
+from the preset given on the command line**, not the one the campaign was recorded with. The
+stalled `full` campaign was resumed as `standard`, which agrees with `full` for only its first 181
+points. A resume now uses the recorded plan unless told otherwise, and refuses any plan that would
+put a recorded point at a different index.
+
+## 8. Open
 
 - **The LoRa transmit path (§4).** Blocks all LoRa results.
 - **Observed metrics are not recorded at all** — no on-board temperature, external interference,
@@ -192,4 +242,10 @@ tail.
   two with no campaign running.
 - **`DutyCycleGuard` is per-transport-instance**, so its history resets on every CFG and it never
   accumulates across a campaign. Host-side pacing in `run_campaign.py` is what actually enforces
-  the budget; the firmware guard is only a per-point backstop.
+  the budget, now across runs too (§7); the firmware guard is only a per-point backstop. The field
+  gateway keeps its own ledger across leases.
+- **Field mode has not left the desk.** Range, the reason it exists, is unmeasured. The −130 dBm
+  desk link (§3) has to be explained first, or every distance will read about that much short.
+- **The Zigbee peer in the field is unverified.** The boards swapped roles on 2026-09-23, and which
+  XBee is on the gateway board has not been read back since. The second run's one Zigbee point was
+  an idle one, so nothing has exercised it.

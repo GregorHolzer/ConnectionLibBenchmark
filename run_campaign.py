@@ -57,14 +57,16 @@ AIRTIME_LEDGER = REPO_ROOT / "results" / "lora_airtime_ledger.txt"
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--preset", choices=sorted(PRESETS), default="standard")
+    parser.add_argument("--preset", choices=sorted(PRESETS),
+                        help="default: standard, or with --resume the campaign's recorded preset")
     parser.add_argument("--budget-hours", type=float,
                          help="override the preset's wall-clock budget")
     parser.add_argument("--forever", action="store_true",
                          help="keep rotating until Ctrl-C. Every rotation is a complete pass over "
                               "all three technologies, so stopping at any point leaves a balanced "
                               "dataset - more repetitions, never partial coverage")
-    parser.add_argument("--techs", nargs="+", default=technologies.ALL, choices=technologies.ALL)
+    parser.add_argument("--techs", nargs="+", choices=technologies.ALL,
+                        help="default: all, or with --resume the campaign's recorded technologies")
     parser.add_argument("--gateway-port")
     parser.add_argument("--node-port")
     parser.add_argument("--zigbee-peer",
@@ -105,9 +107,6 @@ def main():
     args = parser.parse_args()
     if args.zigbee_peer is None:
         args.zigbee_peer = COORDINATOR_ZIGBEE_PEER if args.field else DEFAULT_ZIGBEE_PEER
-    if args.field and "espnow" in args.techs and not args.gateway_mac:
-        parser.error("--field with ESP-NOW needs --gateway-mac; "
-                     "tools/field_gateway.py mac prints it")
 
     # Before any output: this may re-exec under PlatformIO's interpreter, and on a terminal
     # (line-buffered) anything already printed would then appear twice.
@@ -118,7 +117,16 @@ def main():
     # structure, the point-order rotation and --resume identical to a fixed-budget campaign;
     # only the stopping condition changes, from exhausting the schedule to Ctrl-C.
     FOREVER_HOURS = 24 * 30.0
-    budget_hours = FOREVER_HOURS if args.forever else (args.budget_hours or PRESETS[args.preset])
+    recorded = _adopt_recorded_plan(args)
+    args.preset = args.preset or "standard"
+    args.techs = args.techs or technologies.ALL
+    if args.field and "espnow" in args.techs and not args.gateway_mac:
+        parser.error("--field with ESP-NOW needs --gateway-mac; "
+                     "tools/field_gateway.py mac prints it")
+    if recorded:
+        budget_hours = recorded
+    else:
+        budget_hours = FOREVER_HOURS if args.forever else (args.budget_hours or PRESETS[args.preset])
     plan = allocate(budget_hours, args.techs)
 
     if args.forever:
@@ -146,6 +154,8 @@ def main():
               f"-> up to {format_duration(control_s / 0.10)} more at the duty-cycle floor")
 
     schedule = build_schedule(plan, args.techs)
+    if args.resume:
+        _check_resume_matches(args, schedule)
     print(f"  {len(schedule)} configuration points scheduled")
 
     if args.dry_run:
@@ -299,6 +309,54 @@ def main():
     print(f"\nanalyse what you have:\n  ./verify_practices.py --results {out_dir}"
           f"\n  ./plot_results.py --results {out_dir}")
     return 130 if interrupted else (1 if runner.failures else 0)
+
+
+def _resume_dir(args):
+    path = Path(args.resume)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _adopt_recorded_plan(args):
+    """On --resume with no plan given, take the campaign's own: preset, budget and technologies.
+
+    The schedule is rebuilt from these, not stored, so resuming with a different preset silently
+    builds a different schedule. It happened: a `full` campaign was resumed as `standard`, which
+    agrees with `full` for only its first 181 points. Returns the recorded budget in hours, or
+    None when nothing was adopted.
+    """
+    if not args.resume or args.preset or args.budget_hours or args.techs or args.forever:
+        return None
+    meta_path = _resume_dir(args) / "meta.json"
+    if not meta_path.exists():
+        return None
+    meta = json.loads(meta_path.read_text())
+    args.preset, args.techs = meta["preset"], meta["techs"]
+    print(f"resuming with the recorded plan: preset {meta['preset']}, "
+          f"{meta['budget_hours']:.1f} h, {', '.join(meta['techs'])}")
+    return meta["budget_hours"]
+
+
+def _check_resume_matches(args, schedule):
+    """Refuse to resume if any point already recorded sits at a different index in `schedule`.
+
+    Changing the plan on resume is fine while the new schedule still agrees with everything
+    recorded so far - early on, most presets share a long prefix - and corrupts the campaign
+    after that, because --resume skips indices, not points.
+    """
+    points_path = _resume_dir(args) / "points.jsonl"
+    if not points_path.exists():
+        return
+    by_index = {run.index: run.point.key for run in schedule}
+    for line in points_path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        expected = by_index.get(record["run_index"])
+        if expected != record["point_key"]:
+            sys.exit(f"--resume would mix two schedules: point {record['run_index']} was recorded "
+                     f"as {record['point_key']} but this plan has {expected or 'no point'} there. "
+                     f"Resume with the campaign's own plan (omit --preset/--budget-hours/--techs).")
 
 
 def resolve_node_port(args):

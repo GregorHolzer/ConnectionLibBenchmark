@@ -5,8 +5,8 @@ computer attached. Every serial `CFG`/`RUN` path the bench uses stays as it is. 
 alongside it, as two more builds (`field_node`, `field_gateway`) and `run_campaign.py --field`, and
 the bench builds compile none of it.
 
-**Not yet run on hardware.** The protocol, the host's lease handling and the log reconstruction are
-tested off-board; the first real run should be a short one with both boards on the desk.
+**Run on the desk, not yet in the field.** The first two runs, and the three defects they turned
+up, are in [findings.md](findings.md) §7.
 
 ## Running one
 
@@ -114,7 +114,10 @@ SF12 link at every point, so across a campaign it shows how the site's link marg
 ## Duty cycle
 
 The gateway only transmits in reply to the node, so the host's pacing of the node also limits the
-gateway's airtime. Control traffic counts too, and it isn't small: a lease request is **3.0 s** of
+gateway's airtime. The host's ledger is kept in `results/lora_airtime_ledger.txt` and reloaded by
+every run, so a campaign started within the hour of another one inherits its airtime. Before
+that, a second desk run went 50 % over the limit and the gateway's own ledger refused its replies
+(findings.md §7). Control traffic counts too, and it isn't small: a lease request is **3.0 s** of
 SF12 airtime and its ack 1.45 s, on every point of every technology. The host charges each
 request, and the release frames of LoRa points, against its ledger, and prints the extra
 duty-cycle time in the plan, which the allocation itself doesn't include.
