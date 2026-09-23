@@ -17,7 +17,7 @@ physically reset, which is not a risk worth running unattended for ten hours.
 
 import itertools
 
-from . import Point
+from . import Point, raw_stack_points
 
 NAME = "zigbee"
 
@@ -45,6 +45,7 @@ def points():
         else:
             factor, level = "combination", "+".join(varied)
         out.append(Point(NAME, factor, level, params))
+    out.extend(raw_stack_points(NAME, BASELINE))
     return out
 
 

@@ -1,8 +1,9 @@
 """Nordic Power Profiler Kit II capture, accumulated per configuration point.
 
-Wraps the IRNAS `ppk2-api` package. The PPK2 source-meters the **node** board through its battery
-terminal at 3.9 V - the rail a deployed satellite actually runs from - while the campaign runs
-normally over USB serial.
+Wraps the IRNAS `ppk2-api` package. The PPK2 source-meters the **node** board through its 5 V
+header pin (left header pin 10, return on pin 9) at 5.0 V, while the campaign runs normally over a
+USB cable whose VBUS conductor has been cut, so the host carries data but cannot also power the
+board.
 
 Two design decisions worth knowing:
 
@@ -20,17 +21,22 @@ host-side windowing jitter is tens of milliseconds against points lasting second
 
 Everything here is optional. If the package is missing or no PPK2 is attached, `PowerMonitor.create`
 returns None and the campaign runs exactly as before, without energy columns.
+
+Getting the device to talk at all - picking the right interface, un-wedging one left streaming,
+naming whoever else holds the port - is bench/ppk2_port.py.
 """
 
-import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Nominal Li-ion mid-discharge. Measuring at a freshly-charged 4.2 V would flatter every figure;
-# 3.9 V is representative of most of a cell's working life.
-DEFAULT_VOLTAGE_MV = 3900
+from .ppk2_port import find_port, port_holder, recover_streaming
+
+# The 5 V header pin feeds the same net as USB VBUS, so the board sees what a USB supply would
+# give it. This must match the rail actually being sourced: energy_mj is charge times this
+# voltage, so a mismatch scales every energy figure silently.
+DEFAULT_VOLTAGE_MV = 5000
 
 POLL_INTERVAL_S = 0.05
 MAX_RAW_SECONDS = 8.0   # cap on any single retained waveform
@@ -83,10 +89,11 @@ class PowerMonitor:
 
         try:
             if port is None:
-                port = cls._find_port(log)
+                port = find_port(log)
                 if port is None:
                     return None
 
+            recover_streaming(port)
             ppk2 = PPK2_API(port)
             ppk2.get_modifiers()
             if mode == "source":
@@ -103,7 +110,7 @@ class PowerMonitor:
                 + (f" at {voltage_mv} mV" if mode == "source" else ""))
             return monitor
         except Exception as exc:                       # noqa: BLE001 - see docstring
-            holder = cls._port_holder(port)
+            holder = port_holder(port)
             if holder:
                 # By far the most common cause, and the library's own error ("device reports
                 # readiness to read but returned no data") gives no hint of it.
@@ -112,52 +119,6 @@ class PowerMonitor:
             else:
                 log(f"power: PPK2 setup failed ({exc}) — continuing without energy measurement")
             return None
-
-    @staticmethod
-    def _find_port(log):
-        """The PPK2's *data* interface.
-
-        A PPK2 presents two CDC-ACM interfaces and `list_devices()` returns both, unordered. Only
-        the lower one carries the measurement stream; opening the other yields a trickle of
-        nonsense - in testing, 24 samples in 3 s averaging 81 A. So resolve through
-        /dev/serial/by-id and take the lowest interface number rather than trusting list order.
-        """
-        from ppk2_api.ppk2_api import PPK2_API
-
-        by_id = Path("/dev/serial/by-id")
-        if by_id.is_dir():
-            candidates = sorted(
-                (int(re.search(r"-if(\d+)", p.name).group(1)), p.resolve())
-                for p in by_id.glob("*PPK2*") if re.search(r"-if(\d+)", p.name))
-            if candidates:
-                return str(candidates[0][1])
-
-        devices = PPK2_API.list_devices()
-        ports = sorted(d[0] if isinstance(d, (tuple, list)) else d for d in devices)
-        if not ports:
-            log("power: no PPK2 found — continuing without energy measurement")
-            return None
-        return ports[0]
-
-    @staticmethod
-    def _port_holder(port):
-        """Name the process holding `port`, by scanning /proc. Returns None if nothing does."""
-        if not port:
-            return None
-        try:
-            for proc in Path("/proc").iterdir():
-                if not proc.name.isdigit():
-                    continue
-                try:
-                    for link in (proc / "fd").iterdir():
-                        if str(link.resolve()) == port:
-                            name = (proc / "comm").read_text().strip()
-                            return f"{name} (pid {proc.name})"
-                except (OSError, PermissionError):
-                    continue
-        except OSError:
-            pass
-        return None
 
     # -- lifecycle ------------------------------------------------------------------------
 

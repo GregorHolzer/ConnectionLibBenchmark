@@ -13,12 +13,12 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 | `rtt_us` | general | latency | Application send instant → application receive instant, for one request/response exchange. |
 | `send_us` | general | latency | Time blocked inside `Transport::send()`: the outbound transmission plus any backend status wait. |
 | Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. |
-| PDR (uplink, downlink) | domain | — | Distinct sequence numbers received **at the receiver** ÷ sent. Counted per direction. |
+| PDR (uplink, downlink) | domain | — | Distinct sequence numbers received **at the receiver** ÷ sent. Counted per direction. In the field, where the gateway has no host, see [field-campaign.md](field-campaign.md). |
 | Retries / first-attempt success | domain | — | Exchanges completed without retransmission. |
 | Ack rate | domain | — | Fraction of sends the backend reported acknowledged. |
 | Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
 | Duty cycle | domain | — | Airtime consumed against the rolling-window budget. |
-| RSSI / SNR | low-level | — | Where the radio exposes it: LoRa both, Zigbee neither via this API, ESP-NOW neither. |
+| RSSI / SNR | low-level | — | LoRa both, at no cost. ESP-NOW RSSI and Zigbee RSSI only under `--rssi`; neither exposes SNR at all. See below. |
 | **Energy per delivered payload** | domain | — | Measured with a Nordic PPK2 source-metering the **node**'s battery rail at 3.9 V. See below. |
 | **Standing current** | domain | — | Mean current with the radio configured but idle — very likely the figure that decides battery life. |
 
@@ -45,11 +45,19 @@ into the data, and it stops holding the moment any pipelining is introduced.
 
 ### Energy
 
-Measured with a **Nordic PPK2 source-metering the node board's battery terminal at 3.9 V** — the
-rail a deployed satellite actually runs from, at a mid-discharge voltage rather than a flattering
-freshly-charged one. The 18650 is removed (a cell in the holder buffers every current spike, so you
-would measure the charger instead) and the node's USB carries data only, with VBUS cut: otherwise
-the AXP2101 runs from USB and the battery rail reads zero.
+Measured with a **Nordic PPK2 source-metering the node board's 5 V header pin at 5.0 V** (left
+header pin 10, return on pin 9). The 18650 is removed — a cell in the holder buffers every current
+spike, so you would measure the charger instead — and the node's USB carries data only, with the
+cable's VBUS conductor cut: otherwise the host supplies the same net the PPK2 is sourcing and the
+measurement is meaningless.
+
+This tap is upstream of the AXP2101, so it includes the PMU's 5→3.3 V conversion loss and the
+onboard USB-serial bridge in every reading, floor and per-radio alike. **The deltas between
+technologies are therefore the trustworthy quantity; the absolute currents are inflated by a
+constant.** A battery-terminal tap at a mid-discharge 3.9 V would model a deployed satellite's
+rail more directly and exclude that overhead. Whether it is usable here is untested: it depends on
+whether the CH9102F bridge draws from the board's 3.3 V rail or from USB VBUS, and if the latter,
+a battery tap with VBUS cut leaves no serial link for the campaign to be driven over.
 
 The board is **stripped for these measurements**: the GPS rail (ALDO3) is disabled in firmware and
 the OLED is not compiled in. Neither is used by the benchmark, so both were purely constant loads —
@@ -76,6 +84,63 @@ receive at an order of magnitude less.
 other. Absolute battery life needs a duty-cycled sleep model layered on top, since a real satellite
 spends almost all its time asleep and this benchmark spends none of it.
 
+### Signal quality, and why capturing it is opt-in
+
+`--rssi` on either runner turns on per-packet signal quality. It is off by default, and the default
+is the point: the three radios charge very different prices for the same number.
+
+| | RSSI | SNR | Cost of capturing it |
+|---|---|---|---|
+| LoRa | ✅ always | ✅ always | none — RadioLib reads both out of the chip for a packet that already arrived |
+| ESP-NOW | ✅ under `--rssi` | ❌ none exists | a promiscuous-mode sniffer running alongside, which hands every data frame on the channel to the CPU |
+| Zigbee | ✅ under `--rssi` | ❌ none exists | a `DB` AT query per receive: a UART round trip at 9600 baud, inside the window `poll()` is timed over |
+
+The ESP-NOW and Zigbee routes both perturb exactly the energy and latency figures this bench
+exists to produce, so a campaign run with `--rssi` measures a different system from one run
+without. `meta.json` records `rssi_capture` for every campaign, which is what stops the two being
+pooled by accident.
+
+The ESP-NOW sniffer is needed because this Arduino core is on IDF 4.4, whose ESP-NOW receive
+callback takes the legacy three arguments and carries no `rx_ctrl`; the native
+`esp_now_recv_info_t->rx_ctrl->rssi` arrived in IDF 5.x.
+
+**In `raw.csv`, `rssi_dbm` and `snr_db` describe the reply this board received**, not the send.
+Signal quality is a receive-side quantity and no backend populates `SendResult`'s copies of it,
+which is why those columns were empty in every campaign recorded before this was fixed — the
+firmware was printing fields that nothing ever wrote.
+
+None of this promotes RSSI or SNR to a comparison axis. They stay observed metrics, for the
+reasons in ConnectionLib's `docs/measurement-methodology.md` §4.
+
+The field campaign keeps the pong a plain echo instead of carrying the gateway's readings back;
+[field-campaign.md](field-campaign.md) says why.
+
+## The no-library baseline
+
+`stack=raw` runs the same exchange straight onto the vendor API — RadioLib's `SX1278`,
+`esp_now.h`, xbee-arduino's `ZBTxRequest` — with ConnectionLib out of the path. The exposé asks
+for results that keep what the library contributes separable from what the radios contribute, and
+this is the other half of that subtraction.
+
+The raw transports implement the same `Transport` interface, so `runGatewayPoint` measures both
+arms with the same code, the same timing points and the same records; only `send()` and `poll()`
+differ. Each technology sweeps the raw arm across the common payload range, because the library's
+cost is not constant in relative terms. Time-on-air is quantised into symbols, so the header
+costs a near-fixed **+28.7 ms per transmission** at the SF9/BW125/CR4:7 baseline — 14.5 % of an
+8-byte exchange, 4.2 % of an 84-byte one. (Its share of *bytes on air* is the larger 43 % at
+8 bytes; the two are different quantities and only the airtime one drives energy.)
+
+| | bypassed | kept |
+|---|---|---|
+| LoRa | the 6-byte `FrameHeader`, `Address` translation | duty-cycle enforcement |
+| ESP-NOW | `Address` translation, the receive ring buffer | — |
+| Zigbee | `Address` translation, the send-window RX buffering | — |
+
+**Duty-cycle enforcement stays in the raw LoRa arm.** It is a regulatory control rather than a
+library feature under test, and docs/regulations.md is explicit that the EU envelope is never
+relaxed for benchmarking convenience. The raw-versus-library delta is therefore framing,
+addressing and queueing — not duty-cycle logic, and that has to be said with the result.
+
 ## Not measured — and why
 
 These are asked for by the thesis exposé's RQ1 metric set. They are listed here, and printed by
@@ -97,6 +162,13 @@ efficiency would imply a fabricated 100 % for two of the three radios.
 Zigbee perform their own retries and expose only the outcome. This is the practical form of
 practice §1's "low-level metrics may not be portable across hardware architectures": here they are
 not available at all, so no comparison can rest on them.
+
+## Where the numbers are
+
+Measured values, the cross-technology comparison and the open problems live in
+[findings.md](findings.md). This document says what is measured and why; that one says what came
+out. The literature each metric rests on is tabulated there and derived in full in ConnectionLib's
+`docs/measurement-methodology.md`.
 
 ## Aggregation (practice P11)
 

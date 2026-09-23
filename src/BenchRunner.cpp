@@ -1,87 +1,29 @@
+/**
+ * @brief Gateway role: the measured exchange loop, one configuration point per call.
+ *
+ * Strict request/response - never more than one ping in flight, and ping N+1 is not sent until
+ * ping N is answered. Ported from ConnectionLib-examples' pingpong, keeping its corrected timing
+ * and generalised from build-time macros to a runtime BenchConfig.
+ *
+ * The message format and the counters live in BenchExchange; the node's half is in BenchNode.cpp.
+ */
+
 #include "BenchRunner.hpp"
 
 #include <algorithm>
-#include <cstring>
-#include <optional>
 
 #include <Arduino.h>
 
+#include "BenchExchange.hpp"
+
 using namespace connectionlib;
+using namespace bench::detail;
 
 namespace bench {
 
-namespace {
-
-// Poll granularity while waiting for a reply. The original harness used delay(5), which put a hard
-// 5ms floor under every latency figure - every ESP-NOW exchange read exactly 5.00ms, i.e. the
-// harness was being reported rather than the radio. 200us resolves ESP-NOW comfortably while still
-// yielding to the ESP32's WiFi task.
-constexpr uint32_t kPollIntervalUs = 200;
-
-// 4096 sequence numbers of distinct-arrival tracking, for receiver-side PDR. 512 bytes of static
-// RAM, far more than any single configuration point needs.
-constexpr size_t kSeqBitmapWords = 128;
-
-uint32_t g_rxTotal = 0;
-uint32_t g_rxDistinct = 0;
-uint32_t g_repliesOk = 0;
-uint32_t g_replyFailures = 0;
-uint32_t g_seqSeen[kSeqBitmapWords] = {};
-
-void buildMessage(uint8_t *buf, size_t len, char kind, uint16_t seq) {
-    buf[0] = static_cast<uint8_t>(kind);
-    buf[1] = static_cast<uint8_t>(seq & 0xFF);
-    buf[2] = static_cast<uint8_t>((seq >> 8) & 0xFF);
-    for (size_t i = kMinPayloadBytes; i < len; i++) {
-        buf[i] = static_cast<uint8_t>(i);
-    }
-}
-
-uint16_t sequenceOf(const std::vector<uint8_t> &payload) {
-    return static_cast<uint16_t>(payload[1]) |
-           static_cast<uint16_t>(static_cast<uint16_t>(payload[2]) << 8);
-}
-
-bool matches(const ReceivedMessage &msg, char kind, uint16_t seq, size_t len) {
-    if (msg.payload.size() != len || msg.payload.size() < kMinPayloadBytes) {
-        return false;
-    }
-    return msg.payload[0] == static_cast<uint8_t>(kind) && sequenceOf(msg.payload) == seq;
-}
-
-bool markSeen(uint16_t seq) {
-    size_t word = seq / 32;
-    if (word >= kSeqBitmapWords) {
-        return true;   // beyond the bitmap: count it, just cannot dedupe it
-    }
-    uint32_t bit = 1u << (seq % 32);
-    if (g_seqSeen[word] & bit) {
-        return false;
-    }
-    g_seqSeen[word] |= bit;
-    return true;
-}
-
-/** @brief CSV field for an optional metric: the value, or empty where the radio can't report it. */
-void printOptional(const std::optional<float> &value) {
-    if (value.has_value()) {
-        Serial.printf("%.1f", static_cast<double>(*value));
-    }
-}
-
-size_t effectivePayloadBytes(const Transport &transport, const BenchConfig &config) {
-    size_t ceiling = std::min(transport.maxPayloadBytes(), kMaxPayloadBytes);
-    return std::min(std::max(static_cast<size_t>(config.payloadBytes), kMinPayloadBytes), ceiling);
-}
-
-}   // namespace
-
 void resetNodeCounters() {
-    g_rxTotal = 0;
-    g_rxDistinct = 0;
-    g_repliesOk = 0;
-    g_replyFailures = 0;
-    std::memset(g_seqSeen, 0, sizeof(g_seqSeen));
+    detail::counters() = detail::NodeCounters{};
+    detail::resetSeen();
 }
 
 void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfig &config) {
@@ -98,6 +40,15 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
     uint32_t startMs = millis();
 
     while (seq < config.exchanges) {
+        // Any input means the host has given up on this point (Device.resync()); stop, and let the
+        // command loop answer it. Checked here, between attempts and outside every timed region,
+        // so it costs the measurement nothing. Without it a point that overran its timeout kept
+        // retrying for up to 5 x replywait per exchange - 14 minutes at SF12 - while the host's
+        // next commands sat unread in the serial buffer.
+        if (Serial.available() > 0) {
+            break;
+        }
+
         // Pacing floor between attempts, fresh or retry. Not the exchange rate: LoRa's
         // time-on-air and Zigbee's status wait both exceed it comfortably.
         if (lastAttemptMs != 0 && millis() - lastAttemptMs < config.spacingMs) {
@@ -130,6 +81,12 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
 
         uint32_t rttUs = 0;
         bool ok = false;
+        // Signal quality of the *reply*, not of the send. RSSI and SNR are receive-side
+        // quantities - no backend populates SendResult's copies, and printing those is why this
+        // column was empty in every campaign before now. The reply is the only packet this board
+        // receives in an exchange, so its metrics are the ones the gateway can honestly report.
+        std::optional<float> replyRssi;
+        std::optional<float> replySnr;
         if (result.status == SendStatus::Ok) {
             uint32_t waitStart = millis();
             while (millis() - waitStart < config.replyWaitMs) {
@@ -138,6 +95,8 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
                     matches(*received, 'Q', static_cast<uint16_t>(seq), payloadLen)) {
                     rttUs = micros() - t0;
                     ok = true;
+                    replyRssi = received->rssiDbm;
+                    replySnr = received->snrDb;
                     break;
                 }
                 delayMicroseconds(kPollIntervalUs);
@@ -151,9 +110,9 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
                        static_cast<unsigned>(result.totalBytes), static_cast<unsigned long>(sendUs),
                        static_cast<unsigned long>(rttUs), static_cast<int>(result.status),
                        result.acknowledged ? 1 : 0);
-        printOptional(result.rssiDbm);
+        printOptional(replyRssi);
         Serial.print(',');
-        printOptional(result.snrDb);
+        printOptional(replySnr);
         Serial.printf(",%.4f,%d\n", static_cast<double>(transport.currentDutyCyclePercent()),
                        ok ? 1 : 0);
 
@@ -175,66 +134,4 @@ void runGatewayPoint(Transport &transport, const Address &peer, const BenchConfi
                    static_cast<unsigned long long>(sendUsTotal),
                    static_cast<unsigned long>(dutyBlocked));
 }
-
-void nodeTick(Transport &transport) {
-    auto received = transport.poll();
-    if (!received.has_value()) {
-        return;
-    }
-
-    const auto &payload = received->payload;
-    if (payload.size() < kMinPayloadBytes || payload[0] != static_cast<uint8_t>('P')) {
-        return;   // not one of our pings
-    }
-    uint16_t seq = sequenceOf(payload);
-
-    g_rxTotal++;
-    if (markSeen(seq)) {
-        g_rxDistinct++;
-    }
-
-    Serial.printf("PPN,%u,%u,%u,", static_cast<unsigned>(seq), static_cast<unsigned>(payload.size()),
-                   static_cast<unsigned>(received->totalBytes));
-    printOptional(received->rssiDbm);
-    Serial.print(',');
-    printOptional(received->snrDb);
-    Serial.println();
-
-    // Reply is the same size as the ping, so both legs carry an identical payload.
-    uint8_t reply[kMaxPayloadBytes];
-    size_t replyLen = std::min(payload.size(), kMaxPayloadBytes);
-    buildMessage(reply, replyLen, 'Q', seq);
-
-    SendResult result = transport.send(received->source, reply, replyLen);
-    if (result.status == SendStatus::Ok) {
-        g_repliesOk++;
-    } else {
-        g_replyFailures++;
-    }
-
-    Serial.printf("PPM,%lu,%lu,%lu,%lu\n", static_cast<unsigned long>(g_rxDistinct),
-                   static_cast<unsigned long>(g_rxTotal), static_cast<unsigned long>(g_repliesOk),
-                   static_cast<unsigned long>(g_replyFailures));
-}
-
-void runNullMeasurement(const BenchConfig &config) {
-    // Everything the gateway loop does per exchange except touching a radio: the two micros()
-    // reads, the payload construction, and one pass of the poll-wait body. Whatever this costs is
-    // the floor under every latency number the suite reports.
-    uint8_t buf[kMaxPayloadBytes];
-    size_t payloadLen = std::min(std::max(static_cast<size_t>(config.payloadBytes), kMinPayloadBytes),
-                                  kMaxPayloadBytes);
-
-    for (uint32_t i = 0; i < config.exchanges; i++) {
-        uint32_t t0 = micros();
-        buildMessage(buf, payloadLen, 'P', static_cast<uint16_t>(i));
-        uint32_t overheadUs = micros() - t0;
-        Serial.printf("PPD,%lu,1,%u,%u,%lu,%lu,0,0,,,0.0000,1\n", static_cast<unsigned long>(i),
-                       static_cast<unsigned>(payloadLen), static_cast<unsigned>(payloadLen),
-                       static_cast<unsigned long>(overheadUs), static_cast<unsigned long>(overheadUs));
-    }
-    Serial.printf("PPS,%lu,%lu,0,0,0.0000,0,0\n", static_cast<unsigned long>(config.exchanges),
-                   static_cast<unsigned long>(config.exchanges));
-}
-
 }   // namespace bench

@@ -19,7 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bench.device import Device, DeviceError, detect_ports, ensure_pyserial, read_mac_for_port
+from bench.device import Device
+from bench.ports import DeviceError, detect_ports, ensure_pyserial, read_mac_for_port
 from bench.records import parse_records
 
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"

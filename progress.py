@@ -14,15 +14,13 @@ import argparse
 import json
 import sys
 import time
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bench import technologies                                   # noqa: E402
-from bench.campaign import DUTY_CYCLE_FRACTION, POINT_OVERHEAD_S, build_schedule   # noqa: E402
+from bench.eta import duration, remaining_estimate                 # noqa: E402
 
 BAR_WIDTH = 42
 GREEN, YELLOW, RED, DIM, BOLD, RESET = (
@@ -36,59 +34,10 @@ def newest_campaign(results_root):
     return max(candidates, key=lambda p: (p / "status.json").stat().st_mtime)
 
 
-def duration(seconds):
-    if seconds is None:
-        return "?"
-    seconds = int(max(seconds, 0))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes:02d}m"
-    if minutes:
-        return f"{minutes}m {secs:02d}s"
-    return f"{secs}s"
-
-
 def bar(fraction, width=BAR_WIDTH):
     filled = int(round(fraction * width))
     return "█" * filled + "·" * (width - filled)
 
-
-def remaining_estimate(meta, done):
-    """Seconds left, from each technology's own cost model rather than a running average.
-
-    A flat average over completed points is badly wrong here, because the points are not
-    interchangeable: the schedule front-loads ESP-NOW at ~11 s a point, so an hour in the average
-    predicts a 2 h campaign when LoRa alone - at a duty-cycle floor of 28 minutes per repetition -
-    still has five hours to go. Re-deriving the schedule and summing what has not run yet is both
-    simple and honest.
-    """
-    plan, techs = meta.get("plan"), meta.get("techs")
-    if not plan or not techs:
-        return None
-    try:
-        schedule = build_schedule(plan, techs)
-    except (KeyError, ValueError):
-        return None
-    if done >= len(schedule):
-        return 0.0
-
-    # Accumulate per technology, then take the binding constraint for each one separately and add
-    # them up. The technologies share the two boards so they run sequentially, and only LoRa has a
-    # duty cycle - one global max() would let LoRa's five hours of mandatory waiting absorb the
-    # other two technologies' real work and under-report the total by hours.
-    measured, airtime = defaultdict(float), defaultdict(float)
-    for run in schedule[done:]:
-        if run.point.factor == "idle":
-            # Fixed hold, and no transmission at all — an idle radio is receiving, not sending,
-            # so idle points cost no airtime against the duty cycle.
-            measured[run.tech] += technologies.IDLE_SECONDS + POINT_OVERHEAD_S
-            continue
-        module = technologies.get(run.tech)
-        measured[run.tech] += module.estimated_seconds(run.point) + POINT_OVERHEAD_S
-        airtime[run.tech] += module.airtime_seconds(run.point)
-
-    return sum(max(measured[tech], airtime[tech] / DUTY_CYCLE_FRACTION) for tech in measured)
 
 
 def render(results_dir):

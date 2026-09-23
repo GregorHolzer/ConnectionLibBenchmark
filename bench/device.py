@@ -1,27 +1,37 @@
-"""Serial client for one benchmark board, plus flashing and port discovery.
+"""Serial client for one benchmark board.
 
 The device speaks the line protocol described at the top of src/main.cpp. One flashed image serves
 an entire campaign: every hyperparameter, including the peer address, arrives in a CFG command.
+
+Finding and flashing the boards is bench/ports.py, which this module depends on rather than the
+other way round - see the note there.
 """
 
 import re
-import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import serial
 
+from .ports import DeviceError
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Records the firmware emits. Matched on prefix because the Zigbee log interleaves raw XBee API
 # frame bytes with the text, so a line is not guaranteed to start where the record does.
-RECORD_PREFIXES = ("PPH,", "PPD,", "PPS,", "PPN,", "PPM,", "PPI,", "INFO,")
+# RELEASE before LEASE: prefixes are found anywhere in the line, and "RELEASE,ok" contains "LEASE,".
+RECORD_PREFIXES = ("PPH,", "PPD,", "PPS,", "PPN,", "PPM,", "PPI,", "INFO,",
+                   "RELEASE,", "LEASE,", "FLB,", "FLP,")
 
 
-class DeviceError(RuntimeError):
-    pass
+class LeaseNoAck(DeviceError):
+    """The field gateway did not ack a lease over home.
+
+    Kept apart from other errors because it is ambiguous in a way the host has to handle: either
+    the request was lost, and the gateway is still on home, or only the ack was, and the gateway has
+    switched to the point and won't hear home again until its lease runs out.
+    """
 
 
 class Device:
@@ -123,6 +133,49 @@ class Device:
                 header[parts[1]] = parts[2]
         return header
 
+    def lease(self, params, campaign_id, point_id, lease_s, timeout_s=30.0):
+        """Field node only: lease the field gateway for one point, then configure this board.
+
+        Returns (header, home) - the PPH header, as configure() returns it, and the signal quality
+        of the gateway's ack over home. Raises LeaseNoAck when no ack came back, DeviceError for
+        anything else.
+        """
+        args = " ".join(f"{k}={v}" for k, v in params.items())
+        self._serial.reset_input_buffer()
+        self._write(f"LEASE cid={campaign_id:08x} pt={point_id} lease={int(lease_s)} {args}")
+        line, records = self._read_until(("ACK", "ERR,"), timeout_s)
+        if line.startswith("ERR"):
+            error = LeaseNoAck if "noack" in line else DeviceError
+            raise error(f"{self.name}: {line}")
+        header, home = {}, {}
+        for record in records:
+            parts = record.split(",")
+            if parts[0] == "PPH" and len(parts) >= 3:
+                header[parts[1]] = ",".join(parts[2:])
+            elif parts[0] == "LEASE" and len(parts) >= 4:
+                home = {"rssi_dbm": float(parts[2]) if parts[2] else None,
+                        "snr_db": float(parts[3]) if parts[3] else None}
+        return header, home
+
+    def release(self, timeout_s=60.0):
+        """Field node only: send the field gateway back to home. True if it acknowledged."""
+        self._write("RELEASE")
+        _, records = self._read_until(("RDY",), timeout_s)
+        return "RELEASE,ok" in records
+
+    def read_log(self, timeout_s=120.0):
+        """Field gateway only: every record in its flash log."""
+        self._serial.reset_input_buffer()
+        self._write("LOG")
+        _, records = self._read_until(("LOG,end,",), timeout_s)
+        return [r for r in records if r.startswith(("FLB,", "FLP,"))]
+
+    def clear_log(self, timeout_s=10.0):
+        """Field gateway only: delete its flash log."""
+        self._serial.reset_input_buffer()
+        self._write("LOGCLEAR")
+        self._read_until(("ACK",), timeout_s, collect=False)
+
     def run(self, timeout_s):
         """Gateway only: run the configured point to completion. Returns the raw records."""
         self._write("RUN")
@@ -138,6 +191,36 @@ class Device:
         self._write(f"IDLE {int(duration_ms)}")
         _, records = self._read_until(("RDY", "ERR,"), timeout_s or (duration_ms / 1000.0 + 30))
         return records
+
+    def resync(self, timeout_s=60.0):
+        """Stop a board that is still working after a command gave up on it, and wait until it
+        is back in its command loop.
+
+        A run that overruns its timeout has not stopped: the firmware retries every exchange up to
+        five times, so without this the board keeps going for minutes and every command sent in
+        the meantime sits unread. Waiting for silence is not enough - at SF12 the board is quiet
+        for ~8 s between attempts, and a 1.5 s quiet check once let a field campaign carry on
+        while the node was still mid-point.
+
+        Any input makes the measured loop stop between attempts (BenchRunner.cpp), so this sends
+        PING and waits for the PONG, which can only come from the command loop. Returns True if the
+        board reported RDY on the way, i.e. it had still been running a point.
+        """
+        self._serial.reset_input_buffer()
+        self._write("PING")
+        deadline = time.time() + timeout_s
+        finished = False
+        while time.time() < deadline:
+            raw = self._serial.readline()
+            if not raw:
+                continue
+            line = raw.decode(errors="replace")
+            if "RDY" in line:
+                finished = True
+            if "PONG," in line:
+                self._serial.reset_input_buffer()
+                return finished
+        raise DeviceError(f"{self.name}: no answer to PING within {timeout_s:.0f}s of resync")
 
     def drain(self, seconds=0.3):
         """Collect whatever the board has emitted since the last read - the node's PPN/PPM
@@ -171,72 +254,3 @@ class Device:
             self._serial.open()
             time.sleep(1.5)
             self._serial.reset_input_buffer()
-
-
-# USB vendor IDs that are emphatically not benchmark boards. The PPK2 is the one that matters:
-# it presents *two* CDC-ACM interfaces, so an unfiltered scan on a bench with the power monitor
-# attached sees four serial devices instead of two and either fails the "expected exactly 2" check
-# or, worse, hands a PPK2 interface to the flasher.
-NON_BOARD_VIDS = {
-    "1915",   # Nordic Semiconductor — Power Profiler Kit II
-}
-
-
-def detect_ports(pio="pio"):
-    """The real USB serial devices that could be benchmark boards.
-
-    Ignores the virtual /dev/ttyS* that flood Linux, and anything whose vendor ID is known not to
-    be a board (see NON_BOARD_VIDS).
-    """
-    result = subprocess.run([pio, "device", "list"], capture_output=True, text=True, check=True)
-    ports, current = [], None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("/dev/tty") and not line.startswith("/dev/ttyS"):
-            current = line
-        elif line.startswith("Hardware ID:") and "USB VID" in line and current:
-            match = re.search(r"VID:PID=([0-9A-Fa-f]{4}):", line)
-            if not match or match.group(1).lower() not in NON_BOARD_VIDS:
-                ports.append(current)
-            current = None
-    return ports
-
-
-def flash(pio, env, port):
-    """Build and upload. Called at most twice per campaign - everything else is runtime CFG."""
-    subprocess.run([pio, "run", "-e", env, "-t", "upload", "--upload-port", port],
-                    check=True, cwd=REPO_ROOT)
-
-
-def read_mac_for_port(port, pio="pio"):
-    result = subprocess.run(
-        [pio, "pkg", "exec", "--", "esptool.py", "--port", port, "read_mac"],
-        capture_output=True, text=True, check=True, cwd=REPO_ROOT)
-    macs = re.findall(r"MAC: ([0-9A-Fa-f:]{17})", result.stdout)
-    if not macs:
-        raise DeviceError(f"no MAC in esptool output for {port}")
-    return macs[-1]
-
-
-def ensure_pyserial(pio):
-    """Re-exec under PlatformIO's own interpreter if this one lacks pyserial.
-
-    Debian's and Arch's system Pythons are both EXTERNALLY-MANAGED with no usable pip, but
-    PlatformIO's venv always has pyserial as a hard dependency.
-    """
-    try:
-        import serial  # noqa: F401
-        return
-    except ImportError:
-        pass
-
-    import os
-    if os.environ.get("_BENCH_REEXECED"):
-        sys.exit(f"pyserial still missing after re-exec; install it for {sys.executable}")
-    pio_bin = Path(shutil.which(pio) or pio).resolve()
-    for name in ("python3", "python"):
-        candidate = pio_bin.parent / name
-        if candidate.exists():
-            os.environ["_BENCH_REEXECED"] = "1"
-            os.execv(str(candidate), [str(candidate), str(Path(sys.argv[0]).resolve())] + sys.argv[1:])
-    sys.exit(f"pyserial not available and no interpreter found next to {pio_bin}")

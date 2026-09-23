@@ -9,6 +9,12 @@ STATUS_NAMES = {0: "Ok", 1: "Timeout", 2: "DutyCycleExceeded", 3: "PayloadTooLar
                 4: "NotReady", 5: "Failed"}
 
 # One row per gateway send attempt, successes and failures alike.
+#
+# `rssi_dbm` / `snr_db` describe the **reply this board received**, not the send. Signal quality is
+# a receive-side quantity and no backend populates SendResult's copies of it, which is why these
+# columns were empty in every campaign recorded before that was fixed - the firmware was printing
+# fields nothing ever wrote. LoRa fills both from the chip at no cost; ESP-NOW fills rssi only when
+# `rssi=1` puts a promiscuous sniffer alongside, and Zigbee only when `rssi=1` buys a `DB` AT query.
 RAW_COLUMNS = [
     "run_index", "rotation", "tech", "factor", "level", "point_key",
     "started_at", "seq", "attempt", "payload_bytes", "total_bytes",

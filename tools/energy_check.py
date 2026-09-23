@@ -9,15 +9,19 @@ believed at all.
 """
 
 import argparse
+import json
 import statistics
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bench import technologies
-from bench.device import Device, DeviceError, detect_ports, ensure_pyserial, read_mac_for_port
+from bench.device import Device
+from bench.ports import (DeviceError, detect_ports, ensure_pyserial, read_mac_for_port,
+                          wait_for_port)
 from bench.power import PowerMonitor
 from bench.records import parse_records
 
@@ -40,17 +44,30 @@ def main():
     parser.add_argument("--zigbee-peer", default="0013A20042035B39")
     parser.add_argument("--pio", default="pio")
     parser.add_argument("--power-port")
+    parser.add_argument("--json", help="write the measured standing currents here, for the "
+                                        "above-idle analysis a --quick run cannot derive itself")
     parser.add_argument("--idle-seconds", type=float, default=6.0,
                          help="shorter than a campaign's hold; enough to compare standing currents")
     args = parser.parse_args()
 
     ensure_pyserial(args.pio)
+
+    # Before the boards, not after: in source mode the PPK2 is the node's supply, and the node's
+    # USB-serial chip runs off the board rail, so the node has no serial port until the rail is up.
+    print("\n0. PPK2")
+    power = PowerMonitor.create(port=args.power_port, raw_dir=None)
+    if power is None:
+        print(f"  {INFO}  no PPK2 — if it is the node's only supply, nothing below can run")
+
     gw_port, node_port = args.gateway_port, args.node_port
     if not gw_port or not node_port:
-        detected = detect_ports(args.pio)
+        detected = detect_ports(args.pio, expect=2, timeout_s=20.0)
         if len(detected) != 2:
             sys.exit(f"expected 2 serial devices, found {detected}")
         gw_port, node_port = detected
+    for port in (gw_port, node_port):
+        if not wait_for_port(port):
+            sys.exit(f"{port} never appeared — is the PPK2 powering that board?")
 
     node_mac = read_mac_for_port(node_port, args.pio)
     gateway_mac = read_mac_for_port(gw_port, args.pio)
@@ -81,7 +98,6 @@ def main():
             ok &= check("IDLE returns a PPI record", False, str(exc))
 
         print("\n3. PPK2")
-        power = PowerMonitor.create(port=args.power_port, raw_dir=None)
         if power is None:
             print(f"  {INFO}  no PPK2 attached — wire it and re-run to get standing currents")
             print("\nboard checks passed" if ok else "\nSOME CHECKS FAILED")
@@ -108,6 +124,16 @@ def main():
                 print(f"  {FAIL}  {tech}: {exc}")
 
         power.stop()
+
+        if args.json:
+            # A --quick run carries no idle points, so idle_baselines() finds nothing and any
+            # above-idle figure is unavailable. Writing these out lets the analysis subtract a
+            # measured baseline instead of a remembered number.
+            out = {"voltage_mv": power.voltage_mv,
+                    "measured_at": datetime.now().isoformat(timespec="seconds"),
+                    "idle_ma": {k: v for k, v in measured.items() if v is not None}}
+            Path(args.json).write_text(json.dumps(out, indent=2) + "\n")
+            print(f"  {INFO}  wrote {args.json}")
 
         floor = measured.get("none")
         ok &= check("board floor is plausible", floor is not None and 1.0 < floor < 500.0,
