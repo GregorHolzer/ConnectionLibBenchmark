@@ -7,8 +7,8 @@
     tools/field_gateway.py fetch --results results/X     # after collection: arrivals -> node_rx.csv
     tools/field_gateway.py clear --yes                   # empty the log once every campaign is fetched
 
-The gateway must be the board with the Zigbee coordinator (docs/hardware.md). The tool finds it by
-its USB serial number and refuses to touch any other board, so the node can stay plugged in.
+The tool finds the gateway by its USB serial number (bench/board_session.py) and refuses to touch
+any other board, so the node can stay plugged in.
 
 `fetch` keeps the raw log beside the results as gateway_log.txt, then rewrites node_rx.csv and
 writes gateway_leases.csv. It matches records by the campaign id in meta.json, so one log can hold
@@ -24,11 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bench.board_session import BY_ID, KNOWN_BOARDS, board_ports, describe_board
 from bench.ports import ensure_pyserial, flash, read_mac_for_port
 
-COORDINATOR_SERIAL = next(serial for serial, role in KNOWN_BOARDS.items() if role == "coordinator")
+GATEWAY_SERIAL = next(serial for serial, role in KNOWN_BOARDS.items() if role == "gateway")
 
 
 def resolve_port(args):
-    """The coordinator board's by-id path, and never any other board's.
+    """The gateway board's by-id path, and never any other board's.
 
     Picking "the one attached board" is not safe: the node shares the desk, and with its VBUS cut
     it can enumerate on its own - it once did, and was nearly flashed as the gateway.
@@ -37,15 +37,15 @@ def resolve_port(args):
         port = Path(args.port)
         resolved = port.resolve()
         by_id = [p for p in board_ports() if p.resolve() == resolved] or [port]
-        if COORDINATOR_SERIAL not in by_id[0].name and not args.force:
-            sys.exit(f"{args.port} is {describe_board(by_id[0])}, not the coordinator "
-                     f"({COORDINATOR_SERIAL}); pass --force if the boards were deliberately swapped")
+        if GATEWAY_SERIAL not in by_id[0].name and not args.force:
+            sys.exit(f"{args.port} is {describe_board(by_id[0])}, not the gateway "
+                     f"({GATEWAY_SERIAL}); pass --force if the boards were deliberately swapped")
         return args.port
     for path in board_ports():
-        if COORDINATOR_SERIAL in path.name:
+        if GATEWAY_SERIAL in path.name:
             return str(path)
     present = ", ".join(describe_board(p) for p in board_ports()) or "none"
-    sys.exit(f"the coordinator board ({COORDINATOR_SERIAL}) is not attached; boards on "
+    sys.exit(f"the gateway board ({GATEWAY_SERIAL}) is not attached; boards on "
              f"{BY_ID}: {present}")
 
 
@@ -116,7 +116,7 @@ def main():
     parser.add_argument("command", choices=sorted(COMMANDS))
     parser.add_argument("--port")
     parser.add_argument("--force", action="store_true",
-                        help="accept a --port that is not the coordinator board")
+                        help="accept a --port that is not the gateway board")
     parser.add_argument("--pio", default="pio")
     parser.add_argument("--results", help="fetch: the field campaign's results directory")
     parser.add_argument("--yes", action="store_true", help="clear: really delete the log")

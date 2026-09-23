@@ -16,11 +16,12 @@ from .ppk2_port import recover_streaming
 BY_ID = Path("/dev/serial/by-id")
 BOARD_BAUD = 115200
 
-# CH9102 USB serial -> role, from docs/hardware.md. Addressing boards by by-id path rather than
-# ttyACM number matters: the numbering has already swapped between sessions.
+# CH9102 USB serial -> the board's job on the desk. Addressing boards by by-id path rather than
+# ttyACM number matters: the numbering has already swapped between sessions. The serial belongs to
+# the T-Beam's USB chip, not to the XBee on it, so this says nothing about which module is where.
 KNOWN_BOARDS = {
-    "573C000618": "coordinator",
-    "5748001588": "node",
+    "5748001588": "gateway",
+    "573C000618": "node",
 }
 
 DIM, RED, GREEN, RESET = "\033[2m", "\033[31m", "\033[32m", "\033[0m"
