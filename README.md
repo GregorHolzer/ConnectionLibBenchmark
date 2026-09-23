@@ -109,3 +109,5 @@ is reported as a result rather than relaxed — see [docs/regulations.md](docs/r
 - [docs/findings.md](docs/findings.md) — the measured state: cross-technology comparison, what
   ConnectionLib costs against the raw radio API, signal quality, and the open problems. Every
   number traces to a recorded campaign.
+- [docs/field-campaign.md](docs/field-campaign.md) — the design for running unattended across up to
+  4 km with one host: a lease-based control channel and gateway-side logging. Not implemented yet.

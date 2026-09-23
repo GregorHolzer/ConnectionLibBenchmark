@@ -13,7 +13,7 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 | `rtt_us` | general | latency | Application send instant → application receive instant, for one request/response exchange. |
 | `send_us` | general | latency | Time blocked inside `Transport::send()`: the outbound transmission plus any backend status wait. |
 | Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. |
-| PDR (uplink, downlink) | domain | — | Distinct sequence numbers received **at the receiver** ÷ sent. Counted per direction. |
+| PDR (uplink, downlink) | domain | — | Distinct sequence numbers received **at the receiver** ÷ sent. Counted per direction. In the field, where the gateway has no host, see [field-campaign.md](field-campaign.md). |
 | Retries / first-attempt success | domain | — | Exchanges completed without retransmission. |
 | Ack rate | domain | — | Fraction of sends the backend reported acknowledged. |
 | Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
@@ -111,6 +111,9 @@ firmware was printing fields that nothing ever wrote.
 
 None of this promotes RSSI or SNR to a comparison axis. They stay observed metrics, for the
 reasons in ConnectionLib's `docs/measurement-methodology.md` §4.
+
+The field campaign keeps the pong a plain echo instead of carrying the gateway's readings back;
+[field-campaign.md](field-campaign.md) says why.
 
 ## The no-library baseline
 
