@@ -302,7 +302,9 @@ def main():
         # Repetition-major order means whatever was reached is a balanced prefix: every rotation
         # is a complete pass over all three technologies, so stopping early costs repetitions
         # rather than coverage.
-        print(f"\nresume where this left off:\n  ./run_campaign.py --resume {out_dir}")
+        field_args = (f" --field --gateway-mac {args.gateway_mac} --zigbee-peer {args.zigbee_peer}"
+                      if args.field else "")
+        print(f"\nresume where this left off:\n  ./run_campaign.py --resume {out_dir}{field_args}")
     if args.field:
         print(f"\nonce the gateway is collected, bring its node->gateway arrivals in:"
               f"\n  tools/field_gateway.py fetch --results {out_dir}")

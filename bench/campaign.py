@@ -170,7 +170,7 @@ class CampaignRunner:
 
         # Wait for the duty cycle *before* configuring, so the boards are not left sitting in a
         # configured state for an hour.
-        waited = self.airtime.wait_for(airtime)
+        waited = self.airtime.wait_for(airtime, log=self.log)
         if waited:
             self.duty_wait_total_s += waited
             self.log(f"  duty cycle: waited {waited:.0f}s for airtime budget")

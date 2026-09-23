@@ -85,11 +85,13 @@ class AirtimeBudget:
             with self._path.open("a") as handle:
                 handle.write(f"{at:.3f} {seconds:.3f}\n")
 
-    def wait_for(self, seconds, sleeper=time.sleep):
+    def wait_for(self, seconds, sleeper=time.sleep, log=None):
         """Block until `seconds` of additional airtime would fit inside the window.
 
         Returns how long it waited, which the campaign records - a large value is not a stall but
-        the duty cycle being visibly enforced, and it belongs in the results.
+        the duty cycle being visibly enforced, and it belongs in the results. `log` is told before
+        the wait starts: a wait of minutes with nothing on screen looks like a hang, and one was
+        interrupted as one.
         """
         if seconds <= 0:
             return 0.0
@@ -99,6 +101,9 @@ class AirtimeBudget:
             self._prune(now)
             if self.used(now) + seconds <= self.limit_s:
                 return waited
+            if log and waited == 0.0:
+                log(f"  duty cycle: {self.used(now):.0f}s of {self.limit_s:.0f}s LoRa airtime used "
+                    f"in the last hour; waiting until {seconds:.0f}s more fits")
             # Wait until the oldest entry ages out of the window.
             oldest_at, _ = self._entries[0]
             pause = max(1.0, (oldest_at + self.window_s) - now + 0.5)

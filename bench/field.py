@@ -78,7 +78,7 @@ class FieldCampaignRunner(CampaignRunner):
 
     def _charge(self, seconds):
         """Wait for, then record, airtime the node is about to spend on control."""
-        waited = self.airtime.wait_for(seconds)
+        waited = self.airtime.wait_for(seconds, log=self.log)
         if waited:
             self.duty_wait_total_s += waited
             self.log(f"  duty cycle: waited {waited:.0f}s for airtime budget")
@@ -172,7 +172,7 @@ class FieldCampaignRunner(CampaignRunner):
 
         # The point's own airtime first, so the lease is never taken only to sit waiting on the
         # duty cycle while the gateway's lease clock runs.
-        waited = self.airtime.wait_for(airtime + lease_request_airtime_s())
+        waited = self.airtime.wait_for(airtime + lease_request_airtime_s(), log=self.log)
         if waited:
             self.duty_wait_total_s += waited
             self.log(f"  duty cycle: waited {waited:.0f}s for airtime budget")
