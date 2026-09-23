@@ -7,8 +7,8 @@ See docs/field-campaign.md. What changes relative to the bench runner:
   carries the point's configuration over the fixed home config, and ends with a RELEASE.
 * **An unacknowledged lease is ambiguous.** If the request was lost the gateway is still on home;
   if only the ack was, it has switched and won't hear home until its lease runs out. The runner
-  therefore tracks when the gateway is *certain* to be back on home, and never sends a lease
-  before then.
+  therefore tracks when the gateway is *certain* to be back on home, and waits for that before
+  retrying - with one probe allowed first after an unacknowledged release, see _lease().
 * **Node->gateway arrivals are not seen live.** They are in the gateway's flash log, and
   tools/field_gateway.py turns them into node_rx.csv once the gateway has been collected.
 """
@@ -71,6 +71,7 @@ class FieldCampaignRunner(CampaignRunner):
         super().__init__(None, node, peer, None, out_dir, writer, status_path, **kwargs)
         self.campaign_id = campaign_id
         self._gateway_home_at = 0.0
+        self._release_unconfirmed = False
         self.expiry_wait_total_s = 0.0
         self.lease_retries = 0
         self.unreleased = 0
@@ -95,14 +96,25 @@ class FieldCampaignRunner(CampaignRunner):
 
         Retries once at once, which covers a lost request. If that fails too, the ack may have
         been lost instead, so it waits out the lease that might be running and tries a last time.
+
+        After a release nobody acknowledged, the first attempt goes out at once instead of after
+        the previous lease: the release itself usually got through and only its ack was lost - the
+        first desk run logged `released` at the gateway for exactly such a point, and then spent
+        250 s waiting out a lease that had already ended. If the gateway really is still leased,
+        the probe costs one unanswered request and the normal wait follows.
         """
         attempts = 0
         requested_at = None
+        probe = self._release_unconfirmed
+        self._release_unconfirmed = False
         for wait_out_lease in (False, False, True):
             if wait_out_lease:
                 self._gateway_home_at = max(self._gateway_home_at,
                                             requested_at + lease_s + EXPIRY_GUARD_S)
-            self._wait_for_gateway_home()
+            if probe:
+                probe = False
+            else:
+                self._wait_for_gateway_home()
             self._charge(lease_request_airtime_s())
             attempts += 1
             requested_at = time.time()
@@ -180,6 +192,7 @@ class FieldCampaignRunner(CampaignRunner):
             self._gateway_home_at = time.time()
         else:
             self.unreleased += 1
+            self._release_unconfirmed = True
         self.airtime.record(airtime)
 
         _, exchanges, summary, _, _ = parse_records(records)

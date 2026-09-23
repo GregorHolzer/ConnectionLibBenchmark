@@ -54,8 +54,11 @@ configuration the node can no longer reach.
   gateway acks it and goes straight back to home. Without it every point would cost its full
   worst-case lease.
 - **Expiry.** If the release is lost, or the point failed, the gateway **goes back to home when the
-  lease runs out, whether the point worked or not.** The host doesn't send the next lease until
-  then.
+  lease runs out, whether the point worked or not.** When only the release's ack went missing,
+  though, the gateway is already home: the first desk run logged `released` at the gateway for a
+  point whose ack the node never saw, then waited out 250 s of a lease that had already ended. So
+  after an unacknowledged release the host sends one lease at once, and waits out the lease only
+  if that gets no answer either.
 - **Lost ack.** The node can't tell a lost request from a lost ack. The host retries at once, which
   covers a lost request, and if that fails too it waits out the lease that may be running and
   tries a third time. Three failures mark the point failed; it isn't recorded, so `--resume`
