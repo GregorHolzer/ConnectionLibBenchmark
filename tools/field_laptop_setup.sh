@@ -100,7 +100,9 @@ for env in field_node field_gateway; do
     size=$(stat -c%s ".pio/build/$env/firmware.bin")
     ok "$env built, $((size / 1024)) KiB"
 done
-ok "library dependencies cached: $(ls .pio/libdeps/field_node | paste -sd' ')"
+# Directories only: libdeps also holds integrity.dat and the symlink back to ConnectionLib, and
+# calling those "dependencies cached" in a readiness report is just misleading.
+ok "library dependencies cached: $(find .pio/libdeps/field_node -maxdepth 1 -type d -printf '%f ' | sed 's/^ *//')"
 
 printf '\n%sready.%s The field needs no network from here on.\n' "$BOLD" "$RESET"
 cat <<EOF
