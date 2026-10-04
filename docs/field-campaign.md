@@ -10,6 +10,9 @@ up, are in [findings.md](findings.md) §7.
 
 ## Running one
 
+[field-runbook.md](field-runbook.md) is the operational version of this section — wiring, the
+order of operations, and what good output looks like. In outline:
+
 1. **Before deployment**, with the coordinator board on USB:
    `tools/field_gateway.py flash`. It prints the gateway's MAC, which ESP-NOW needs.
    `tools/field_gateway.py status` confirms the firmware and shows the log size.

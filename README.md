@@ -110,4 +110,7 @@ is reported as a result rather than relaxed — see [docs/regulations.md](docs/r
   ConnectionLib costs against the raw radio API, signal quality, and the open problems. Every
   number traces to a recorded campaign.
 - [docs/field-campaign.md](docs/field-campaign.md) — the design for running unattended across up to
-  4 km with one host: a lease-based control channel and gateway-side logging, and how to run it.
+  4 km with one host: a lease-based control channel and gateway-side logging, and why both.
+- [docs/field-runbook.md](docs/field-runbook.md) — how to actually run one: the wiring, the order
+  of operations, what good output looks like, and the traps that return wrong numbers rather than
+  errors. `tools/field_laptop_setup.sh` prepares a laptop; `run_field.py` runs one site.
