@@ -90,38 +90,42 @@ def site_configs(techs=("zigbee", "espnow", "lora")):
     return out
 
 
-def ping_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
-    """Time-on-air of one payload frame. 0 off LoRa."""
+def _lora_airtime_ms(config, payload_bytes, header_bytes):
     if config.tech != "lora":
         return 0.0
     p = config.params
-    return time_on_air_ms(config.payload, sf=p["sf"], bw_khz=p["bw"], coding_rate=p["cr"],
+    return time_on_air_ms(payload_bytes, sf=p["sf"], bw_khz=p["bw"], coding_rate=p["cr"],
                           preamble=p["preamble"], header_bytes=header_bytes)
 
 
-def ack_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
-    """Time-on-air of the gateway's 8-byte ack, or of any header-only frame. 0 off LoRa."""
-    if config.tech != "lora":
-        return 0.0
-    p = config.params
-    return time_on_air_ms(CONTROL_FRAME_BYTES, sf=p["sf"], bw_khz=p["bw"], coding_rate=p["cr"],
-                          preamble=p["preamble"], header_bytes=header_bytes)
+def payload_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
+    """Time-on-air of one data frame. 0 off LoRa."""
+    return _lora_airtime_ms(config, config.payload, header_bytes)
 
 
-def reply_wait_ms(config):
-    """How long the node waits for an ack. Must exceed the ack's own time-on-air, which at SF12
-    is over a second; short otherwise, because every lost payload costs the whole wait."""
-    return int(max(1000, 3 * ack_airtime_ms(config) + 500))
+def control_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
+    """Time-on-air of a header-only benchmark frame (probe, report request). 0 off LoRa."""
+    return _lora_airtime_ms(config, CONTROL_FRAME_BYTES, header_bytes)
+
+
+def ack_wait_ms(config):
+    """How long LoRa's send() waits for the library's ack, which is a bare header on the air.
+
+    Must cover that ack's time-on-air - over a second at SF12 - plus the gateway's turnaround.
+    Kept short otherwise, because every lost payload costs the whole wait. ESP-NOW and Zigbee
+    time their own acks inside the radio; for them this only bounds the wait for the report.
+    """
+    return int(max(1000, 2 * _lora_airtime_ms(config, 0, LORA_HEADER_BYTES) + 500))
 
 
 def lease_seconds(config):
     """How long the gateway stays on a LoRa point if it never hears the release.
 
-    An upper bound on the run: every exchange's ping and a full reply wait, with 100 ms of slack
-    each, then the three count probes. Rounded up to the 4 s step the switch frame carries.
+    An upper bound on the run: every payload's airtime and a full ack wait, with 100 ms of slack
+    each, then the report. Rounded up to the 4 s step the switch frame carries.
     """
     if config.tech != "lora" or config.exchanges == 0:
         return 0
-    per_exchange_ms = 100 + ping_airtime_ms(config) + reply_wait_ms(config)
+    per_exchange_ms = 100 + payload_airtime_ms(config) + ack_wait_ms(config)
     seconds = (config.exchanges + 3) * per_exchange_ms / 1000.0 + 15
     return min(1020, int(-(-seconds // 4) * 4))

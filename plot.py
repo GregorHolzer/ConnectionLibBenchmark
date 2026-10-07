@@ -37,15 +37,14 @@ def _energy(name):
 
 # (title, y label, value of a summary row, log y axis)
 COMPARISON_PANELS = [
-    ("Round-trip delivery", "PDR", lambda row: row["round_trip_pdr"], False),
-    ("Uplink delivery (node → gateway)", "PDR", lambda row: row["uplink_pdr"], False),
-    ("Downlink delivery (gateway → node)", "PDR", lambda row: row["downlink_pdr"], False),
-    ("Round-trip time, median", "ms", _median("rtt_us", 1e-3), True),
-    ("Goodput, one way (payload bits per second)", "bit/s", lambda row: row["goodput_bps"], True),
+    ("Delivery, confirmed by the library's ack", "PDR", lambda row: row["pdr"], False),
+    ("Delivery, counted at the gateway", "PDR", lambda row: row["gateway_pdr"], False),
+    ("Delivery latency, median (time in send())", "ms", _median("latency_us", 1e-3), True),
+    ("Goodput, one way", "bit/s", lambda row: row["goodput_bps"], True),
     ("Energy per delivered payload", "mJ", _energy("energy_per_delivered_mj"), True),
     ("… above the radio's standing current", "mJ", _energy("excess_energy_per_delivered_mj"), True),
-    ("RSSI at the node", "dBm", _median("rssi_dbm"), False),
-    ("RSSI at the gateway", "dBm", _median("gw_rssi_dbm"), False),
+    ("RSSI at the gateway (LoRa)", "dBm", lambda row: row["gw_rssi_dbm"], False),
+    ("SNR at the gateway (LoRa)", "dB", lambda row: row["gw_snr_db"], False),
 ]
 
 
@@ -74,7 +73,7 @@ def _style_axis(axis, title, ylabel, log_y, distances):
 def plot_comparison(rows, out_path):
     baselines = [row for row in rows if row["name"] == "baseline"]
     distances = sorted({row["distance_m"] for row in baselines})
-    figure, axes = plt.subplots(3, 3, figsize=(15, 11), sharex=True)
+    figure, axes = plt.subplots(2, 4, figsize=(20, 8), sharex=True)
     for axis, (title, ylabel, value, log_y) in zip(axes.flat, COMPARISON_PANELS):
         for tech in ("zigbee", "espnow", "lora"):
             xs, ys = _series([row for row in baselines if row["tech"] == tech], value, log_y)
@@ -97,8 +96,8 @@ def plot_lora_sweep(rows, out_path):
     factors = list(configs.LORA_FACTORS)
     figure, axes = plt.subplots(2, len(factors), figsize=(4 * len(factors), 7.5), sharex=True,
                                 squeeze=False)
-    panels = [("Round-trip delivery", "PDR", lambda row: row["round_trip_pdr"], False),
-              ("Round-trip time, median", "ms", _median("rtt_us", 1e-3), True)]
+    panels = [("Delivery", "PDR", lambda row: row["pdr"], False),
+              ("Delivery latency, median", "ms", _median("latency_us", 1e-3), True)]
     for column, factor in enumerate(factors):
         levels = configs.LORA_FACTORS[factor]
         for index, level in enumerate(levels):

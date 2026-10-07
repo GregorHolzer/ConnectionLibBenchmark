@@ -25,7 +25,7 @@ Address peerMac() {
 
 }   // namespace
 
-std::unique_ptr<Transport> makeLoRa(const LoRaParams &params) {
+std::unique_ptr<Transport> makeLoRa(const LoRaParams &params, uint32_t ackTimeoutMs) {
     LoRaConfig cfg;   // duty cycle stays at the library's EU default of 10 % per hour
     cfg.frequencyMHz = kFrequencyMHz;
     cfg.bandwidthKHz = params.bandwidthKHz;
@@ -33,6 +33,7 @@ std::unique_ptr<Transport> makeLoRa(const LoRaParams &params) {
     cfg.codingRate = params.codingRate;
     cfg.txPowerDbm = params.txPowerDbm;
     cfg.preambleLength = params.preambleLength;
+    cfg.ackTimeoutMs = ackTimeoutMs;
 #if defined(BENCH_GATEWAY)
     cfg.nodeId = kGatewayLoRaId;
 #else
@@ -55,7 +56,7 @@ std::unique_ptr<Transport> makeZigbee() {
 std::unique_ptr<Transport> makeTransport(Tech tech) {
     switch (tech) {
         case Tech::EspNow: return makeEspNow();
-        case Tech::LoRa: return makeLoRa(kPoint);
+        case Tech::LoRa: return makeLoRa(kPoint, kAckWaitMs);
         case Tech::Zigbee: return makeZigbee();
         case Tech::None: break;
     }

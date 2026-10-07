@@ -10,12 +10,13 @@ import time
 from collections import deque
 from pathlib import Path
 
-# ConnectionLib prepends destNodeId/srcNodeId/seq/payloadLen to every LoRa frame, because a raw
-# SX1278 has no addressing. The raw firmware sends none of it, so it is a parameter.
-LORA_HEADER_BYTES = 6
+# ConnectionLib prepends destNodeId/srcNodeId/seq/payloadLen/flags to every LoRa frame, because a
+# raw SX1278 has no addressing; the flags byte is there because the benchmark builds the library
+# with CONNECTIONLIB_LORA_ACK. An ack is that header alone.
+LORA_HEADER_BYTES = 7
 
-# Paced a little under the legal 10 %, as margin for the estimate. The gateway only sends 8-byte
-# acks, so its own budget is never the one that runs out first.
+# Paced a little under the legal 10 %, as margin for the estimate. The gateway only sends the
+# library's header-only acks, so its own budget is never the one that runs out first.
 DUTY_CYCLE_FRACTION = 0.09
 DUTY_CYCLE_WINDOW_S = 3600.0
 
@@ -23,7 +24,7 @@ DUTY_CYCLE_WINDOW_S = 3600.0
 HOME = {"sf": 12, "bw_khz": 125, "coding_rate": 8, "preamble": 8}
 SWITCH_FRAME_BYTES = 10
 CONTROL_FRAME_BYTES = 8
-CONTROL_ATTEMPTS = 3   # src/node.cpp kControlAttempts
+CONTROL_ATTEMPTS = 3   # src/NodeControl.cpp kAttempts
 
 
 def time_on_air_ms(payload_bytes, sf=9, bw_khz=125.0, coding_rate=7, preamble=8,
@@ -45,15 +46,15 @@ def time_on_air_ms(payload_bytes, sf=9, bw_khz=125.0, coding_rate=7, preamble=8,
 
 def point_airtime_s(ping_ms, control_ms, pings, switch_attempts=CONTROL_ATTEMPTS, clean=False,
                     header_bytes=LORA_HEADER_BYTES):
-    """What one LoRa point costs the node: its pings, the switch on home, and the header-only
-    frames on the point (probe, count request, release).
+    """What one LoRa point costs the node: its payloads, the switch on home, and the header-only
+    frames on the point (probe, report request).
 
     With the defaults this is the upper bound, used to reserve airtime before a point runs and to
     charge one that did not end cleanly; over-charging is the safe side. A clean point is charged
-    what it sent: `switch_attempts` switches, one count request and one release.
+    what it sent: `switch_attempts` switches and one report request.
     """
     switch_ms = time_on_air_ms(SWITCH_FRAME_BYTES, header_bytes=header_bytes, **HOME)
-    control_frames = 2 if clean else 3 * CONTROL_ATTEMPTS
+    control_frames = 1 if clean else 2 * CONTROL_ATTEMPTS
     return (pings * ping_ms + switch_attempts * switch_ms + control_frames * control_ms) / 1000.0
 
 

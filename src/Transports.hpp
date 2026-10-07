@@ -14,14 +14,15 @@
 
 namespace bench {
 
-std::unique_ptr<connectionlib::Transport> makeLoRa(const LoRaParams &params);
+/** @brief ackTimeoutMs: how long send() waits for the library's ack at these parameters. */
+std::unique_ptr<connectionlib::Transport> makeLoRa(const LoRaParams &params, uint32_t ackTimeoutMs);
 std::unique_ptr<connectionlib::Transport> makeEspNow();
 std::unique_ptr<connectionlib::Transport> makeZigbee();
 
 /** @brief The transport for `tech` at this build's point, or nullptr for Tech::None. */
 std::unique_ptr<connectionlib::Transport> makeTransport(Tech tech);
 
-/** @brief Where the node sends its pings. The gateway replies to whatever source it heard. */
+/** @brief Where the node sends. The gateway replies to whatever source it heard. */
 connectionlib::Address gatewayAddress(Tech tech);
 
 }   // namespace bench

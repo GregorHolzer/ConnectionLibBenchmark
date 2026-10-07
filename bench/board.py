@@ -10,7 +10,7 @@ import time
 import serial
 
 BAUD = 115200
-RECORD_PREFIXES = ("READY", "PPH,", "PPD,", "PPS,", "HOME,", "IDLE,", "RUN,", "RELEASE,", "ERR,",
+RECORD_PREFIXES = ("READY", "PPH,", "PPD,", "PPS,", "HOME,", "IDLE,", "RUN,", "REPORT,", "ERR,",
                    "END")
 
 

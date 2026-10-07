@@ -10,64 +10,58 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 
 | Metric | Category | Axis | Definition |
 |---|---|---|---|
-| `rtt_us` | general | latency | Application send instant → application receive instant, for one request/response exchange. |
-| `send_us` | general | latency | Time blocked inside `Transport::send()`: the outbound transmission plus any backend status wait. |
+| `latency_us` | general | latency | Time inside `Transport::send()`: from handing a payload to the library until the library has its ack. Reported for acknowledged payloads. |
 | Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. One way, back to back; each payload waits for its ack. |
-| PDR (uplink, downlink, round trip) | domain | — | Packets received **at the receiver** ÷ sent, per direction. Each ping is sent once. See "Delivery" below. |
-| Ack rate | domain | — | Fraction of sends the backend reported acknowledged. |
+| PDR | domain | — | Payloads the library reported acknowledged ÷ sent. Beside it, the gateway's own count ÷ sent. See below. |
 | Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
 | Duty cycle | domain | — | Airtime consumed against the rolling-window budget. |
 | RSSI / SNR | low-level | — | LoRa only, at both ends, at no cost. See below. |
 | **Energy per delivered payload** | domain | — | Measured with a Nordic PPK2 source-metering the **node**'s battery rail at 3.9 V. See below. |
 | **Standing current** | domain | — | Mean current with the radio configured but idle — very likely the figure that decides battery life. Measured once, by `bench.py baseline`. |
 
-### The exchange, and delivery
+### The transfer, and delivery
 
-A one-way transfer from node to gateway, as fast as the link allows (`src/node.cpp`). The node
-sends payload N **once** (the "ping"), the gateway confirms it with an 8-byte ack (the "pong"),
-and the node sends N+1 the moment that ack is back. `rtt_us` is therefore the time from handing
-a payload to `send()` until its delivery is confirmed, and goodput is one-way payload bits per
-second of a back-to-back burst. There are no retries, so nothing a retry
-would have repaired is hidden, and a point costs the same airtime whether the link is good or bad.
-A point stops after 10 losses in a row and is recorded as out of range.
+A one-way transfer from node to gateway, as fast as the link allows (`src/node.cpp`). The loop is
 
-Nothing but the radio happens between `RUN,begin` and `RUN,end`: each exchange's figures go into a
+    result = link.send(gateway, payload)
+
+repeated, each payload sent **once**. `send()` returns when the library has its confirmation of
+delivery, or has given up waiting for it:
+
+| | what confirms delivery |
+|---|---|
+| ESP-NOW | the 802.11 MAC ack, reported by the send callback |
+| Zigbee | the APS ack, reported in the module's TX status frame |
+| LoRa | ConnectionLib's software ack (`CONNECTIONLIB_LORA_ACK`): the receiver's `listen()` answers with a bare header, and `send()` waits for it |
+
+The benchmark adds no acknowledgement of its own. The gateway application calls `listen()` and
+counts. There are no retries at the benchmark level, so nothing a retry would have repaired is
+hidden (ESP-NOW and Zigbee retry inside the radio, which is part of what they are). A point stops
+after 10 losses in a row and is recorded as out of range.
+
+Nothing but the radio happens between `RUN,begin` and `RUN,end`: each payload's figures go into a
 buffer in RAM and are printed once the run is over. The serial port is therefore in neither the
-timings nor the energy window, and there is no pause between exchanges.
+timings nor the energy window, and there is no pause between payloads.
 
-The gateway has no host, so its side of the count travels in the pong: every pong carries how many
-pings of this run the gateway has received so far (`gw_rx`), plus its own RSSI and SNR of that
-ping. After the last ping the node asks for the final count up to three times, outside the timed
-window, so a lost last pong does not understate it.
+**Two delivery figures.** *PDR* is acknowledged ÷ sent: what an application using the library
+sees. After the run the node asks the gateway for a report, and *gateway PDR* is the gateway's own
+count ÷ sent. The second can be higher, because a payload can arrive while its ack is lost; the
+difference is the ack loss. If the report does not come back, the gateway figure is unknown, not
+zero.
 
-- **Uplink PDR** = `gw_rx` ÷ pings sent.
-- **Downlink PDR** = pongs received ÷ `gw_rx`.
-- **Round-trip PDR** = pongs received ÷ pings sent.
+**Latency** is the time inside `send()`. On LoRa that is the payload's airtime, the gateway's
+turnaround and the ack's airtime; on ESP-NOW and Zigbee it is whatever the radio needs to get its
+own ack, retries included. An unacknowledged LoRa payload costs the full ack wait
+(`configs.ack_wait_ms`, 1.0–2.7 s), which is why latency is reported for acknowledged payloads and
+the loss shows up in goodput and energy instead.
 
-If no pong arrives at all, the gateway's count is unknown: uplink and downlink are then reported
-as unknown, not as zero, and only the round trip is zero. If the final count request also goes
-unanswered, `gw_rx` is the last value seen and uplink is a lower bound.
-
-The reply wait polls `listen(0)` every 200 µs rather than calling `listen(timeout)`: the library's
-blocking `listen()` sleeps in 1 ms steps, which would quantise ESP-NOW's ~3.5 ms round trip.
-
-### Why `rtt_us` and `send_us` are separate
-
-Reporting only one of these produced two wrong published numbers in an earlier harness, both of
-which looked plausible:
-
-- The timer started **after** `send()` returned, so the outbound transmission was excluded. LoRa
-  was reported at 212 ms when the true round trip is 409 ms — the 212 ms was the reply leg alone,
-  which matched the computed single-leg time-on-air almost exactly.
-- On Zigbee the effect was total: a broadcast blocks ~1 s inside `send()` waiting for its APS
-  status, the reply lands inside that window and is buffered, and the measured round trip was
-  **0 ms**.
-
-Splitting the two makes the cost structure visible instead of hiding it in a single number.
+The library polls for its acks in 1 ms steps (`delay(1)` in ESP-NOW's and LoRa's `send()`), so
+ESP-NOW latency is quantised to about a millisecond. That is the library's behaviour and is
+measured as such.
 
 ### Latency vs. throughput (practice P1)
 
-Goodput is measured over the whole configuration point and is **not** derived from `rtt_us`. The
+Goodput is measured over the whole configuration point and is **not** derived from `latency_us`. The
 exchange is a strict request/response with at most one packet in flight, so latency and throughput
 happen to be closely coupled here — but deriving one from the other would bake that assumption
 into the data, and it stops holding the moment any pipelining is introduced.
@@ -93,8 +87,8 @@ the OLED is not compiled in. Neither is used by the benchmark, so both were pure
 harmless for latency, but for energy they sit under every measurement and compress exactly the
 per-technology differences the comparison exists to resolve.
 
-The metered board is the **initiator**. Its active window runs from the first ping to the last
-pong or timeout, so it includes waiting for pongs that never come: energy per delivered payload
+The metered board is the **sender**. Its active window is the loop, first `send()` to last, so it
+includes waiting for acks that never come: energy per delivered payload
 rises as the link degrades, which is what a deployed node would pay. The September bench
 campaigns metered the responder instead and are not comparable.
 
@@ -120,11 +114,11 @@ spends almost all its time asleep and this benchmark spends none of it.
 
 ### Signal quality
 
-Only LoRa reports it. RadioLib reads RSSI and SNR out of the chip for a packet that already
-arrived, at no cost, so every answered exchange records both ends: `rssi_dbm` / `snr_db` are the
-node's reading of the pong, `gw_rssi_dbm` / `gw_snr_db` the gateway's reading of the ping. Every
-LoRa point also records the RSSI and SNR of the gateway's switch ack on home, the same SF12 link
-at every point, which shows how a site's link margin moved during the visit.
+Only LoRa reports it, and only at the gateway. RadioLib reads RSSI and SNR out of the chip for
+every frame that arrives, at no cost; the gateway averages them over the run's payloads and
+returns the two means in its report. There is no per-payload signal quality at the node: the only
+thing the node receives during a run is the library's ack, and `SendResult` does not carry the
+ack's RSSI.
 
 ESP-NOW and Zigbee record none. Getting it costs a promiscuous-mode sniffer on ESP-NOW and a `DB`
 AT query per packet on Zigbee, both of which move the latency and energy figures; the opt-in
@@ -140,25 +134,24 @@ RSSI and SNR stay observed metrics, not comparison axes, for the reasons in Conn
 same node and gateway firmware on the vendor APIs — RadioLib's `SX1278`, `esp_now.h`,
 xbee-arduino's `ZBTxRequest` — with ConnectionLib out of the path. `src/Transports.cpp` is the
 only file that differs, so the measured loop, the timing points and the records are the same code.
-Its README lists what each raw transport bypasses. It is a separate pass with its own gateway
-image, because a raw LoRa frame has no header for a library gateway to recognise.
+It is a separate pass with its own gateway image.
 
-On LoRa the library's 6-byte header costs airtime in whole symbols: a near-fixed +28.7 ms per
-transmission at the SF9 / 125 kHz / 4:7 baseline, 14.5 % of an 8-byte exchange and 4.2 % of an
-84-byte one (September bench measurement, [findings.md](findings.md)).
+**It covers ESP-NOW and Zigbee only.** Those radios acknowledge on their own, so the same loop
+runs on the raw API. A raw SX1278 has no acknowledgement at all: the loop's delivery signal on
+LoRa *is* a ConnectionLib feature, so there is nothing to compare it against without writing a
+second ack protocol, which would then be measured instead of the radio.
 
 ## Not measured — and why
 
-**Retries.** There are none, by design; see "The exchange, and delivery".
+**Benchmark-level retries.** There are none, by design; see "The transfer, and delivery".
 
 These are asked for by the thesis exposé's RQ1 metric set. They are listed here, and printed by
 the analysis tooling, rather than silently omitted.
 
 **One-way delay and one-way jitter.** Requires clock synchronisation between the two boards;
 `becker2025` used Reference Broadcast Synchronization over the wireless link for exactly this.
-Round-trip ÷ 2 is not a substitute: these links are strongly asymmetric — a Zigbee gateway
-broadcast leg and the node's unicast reply differ by an order of magnitude. Round-trip latency and
-its variation are reported instead, and labelled as such.
+What is reported is the time until delivery is *confirmed* at the sender, which contains the ack's
+way back, and it is labelled as such.
 
 **PHY-level payload efficiency.** `totalBytes` counts framing that **ConnectionLib** adds — LoRa's
 6-byte software header, which exists because raw SX1278 has no addressing, versus zero added bytes

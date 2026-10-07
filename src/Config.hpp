@@ -20,7 +20,7 @@
 #define BENCH_PAYLOAD 32
 #define BENCH_EXCHANGES 0
 #define BENCH_IDLE_MS 0        // hold with the radio up but silent: the standing-current window
-#define BENCH_REPLY_WAIT_MS 2000
+#define BENCH_ACK_WAIT_MS 1000   // LoRa: how long send() waits for the library's ack
 #define BENCH_LEASE_S 60       // how long the gateway stays on a LoRa point before going home
 #define BENCH_LORA_BW_KHZ 125
 #define BENCH_LORA_SF 9
@@ -53,7 +53,8 @@ constexpr uint8_t kRunId = BENCH_RUN_ID;
 constexpr size_t kPayloadBytes = BENCH_PAYLOAD;
 constexpr uint32_t kExchanges = BENCH_EXCHANGES;
 constexpr uint32_t kIdleMs = BENCH_IDLE_MS;
-constexpr uint32_t kReplyWaitMs = BENCH_REPLY_WAIT_MS;
+constexpr uint32_t kAckWaitMs = BENCH_ACK_WAIT_MS;
+constexpr uint32_t kHomeAckWaitMs = 4000;   // an ack on home is ~1.3 s of SF12 airtime
 constexpr uint32_t kLeaseSeconds = BENCH_LEASE_S;
 
 constexpr float kFrequencyMHz = 433.2f;
@@ -70,8 +71,8 @@ constexpr uint64_t kPeerXbee64 = BENCH_PEER_XBEE;    // the gateway's XBee, used
 
 // The EU envelope (docs/regulations.md), checked by the compiler: a configuration outside it does
 // not build, so it can never be flashed, let alone recorded as measured.
-static_assert(kPayloadBytes >= 8, "payload must hold the 8-byte ping/pong header");
-static_assert(kPayloadBytes <= (kTech == Tech::Zigbee ? 84 : kTech == Tech::LoRa ? 249 : 250),
+static_assert(kPayloadBytes >= 8, "payload must hold the 8-byte frame header");
+static_assert(kPayloadBytes <= (kTech == Tech::Zigbee ? 84 : kTech == Tech::LoRa ? 248 : 250),
               "payload exceeds this radio's single-packet limit");
 static_assert(kPoint.txPowerDbm <= 7, "above 7 dBm conducted exceeds 10 mW e.r.p.");
 static_assert(kPoint.spreadingFactor >= 7 && kPoint.spreadingFactor <= 12, "SF must be 7..12");

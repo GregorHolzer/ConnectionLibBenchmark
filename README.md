@@ -37,11 +37,15 @@ Host-side tests need no hardware: `python -m unittest discover tests`.
 
 ## How it measures
 
-A one-way transfer, node to gateway, as fast as the link allows. The node sends payload N once;
-the gateway confirms it with an 8-byte ack; the node sends N+1 the moment that ack is back. No retries, so delivery is simply counted. Results are
-kept in RAM and printed after the run, so the serial port is in neither the timings nor the energy. Each pong carries the
-gateway's running count of pings received, which is what splits a lost round trip into "ping
-lost" and "pong lost" without a host at the gateway. Details and every metric:
+A one-way transfer, node to gateway, as fast as the link allows. The measured loop is the
+library's `send()` and nothing else: it returns once the library has its confirmation of delivery
+— ESP-NOW's MAC ack, Zigbee's APS ack, ConnectionLib's software ack on LoRa — and the next payload
+goes out at once. Time in `send()` is the delivery latency, `acknowledged` is the delivery. No
+retries, no pause, and results are kept in RAM and printed after the run, so the serial port is in
+neither the timings nor the energy.
+
+The gateway application answers no data frame. It counts what arrives and, when the node asks
+after its run, sends one report with that count and the mean RSSI/SNR. Details and every metric:
 [docs/metrics.md](docs/metrics.md). How the gateway follows LoRa settings, what a site costs in
 duty cycle, and what limits the result: [docs/field-campaign.md](docs/field-campaign.md).
 
@@ -50,9 +54,9 @@ duty cycle, and what limits the result: [docs/field-campaign.md](docs/field-camp
 | | |
 |---|---|
 | `src/node.cpp` | the measured loop; one configuration per build |
-| `src/NodeLoRa.cpp` | the node's side of the LoRa handshake |
-| `src/gateway.cpp` | the responder: all three radios up, LoRa on home until asked to move |
-| `src/Frames.hpp` | the frames the two exchange |
+| `src/NodeControl.cpp` | around the loop: move the gateway to a LoRa point, collect its report |
+| `src/gateway.cpp` | the receiver: all three radios up, LoRa on home until asked to move |
+| `src/Frames.hpp` | the application frames: data, LoRa switch, report |
 | `src/Config.hpp` | the configuration macros and the EU envelope as `static_assert`s |
 | `src/Transports.cpp` | the only file that names a ConnectionLib backend |
 | `bench.py` | the command line |

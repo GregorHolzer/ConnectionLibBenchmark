@@ -4,7 +4,7 @@ How the benchmark runs when the boards are up to 2 km apart and only one of them
 
 **No exchange has been made with this harness yet.** As of 2026-10-07 the firmware builds, the
 host code is unit-tested, and the node alone has been flashed, started and metered through an idle
-hold on the bench. The gateway image, the handshake and the ping-pong itself have not run on
+hold on the bench. The gateway image, the handshake and the transfer itself have not run on
 hardware. Do a desk run (`site --distance 0`) before the first trip, and read "Before trusting a
 result" below.
 
@@ -37,27 +37,33 @@ else reaches it.
 - **Home**: SF12, 125 kHz, CR 4/8, 7 dBm, the most robust setting in the envelope. The gateway
   waits there. If home does not reach a spot, no swept setting would have.
 - **Switch**: a LoRa node build starts by sending, on home, a 10-byte frame with its setting and a
-  lease length. The gateway acks on home and moves.
-- **Release**: after its pings the node sends a release on the point; the gateway acks and goes
-  home.
-- **Lease**: if the release never arrives, the gateway goes home when the lease runs out. The
-  lease is an upper bound on the run (`configs.lease_seconds`), 44–180 s depending on the setting.
-- **Lost ack**: a missing switch ack means either the request or the ack was lost. The node
-  therefore probes on the point after every unacknowledged attempt and carries on if answered.
-- **Host side**: after a LoRa point without an acknowledged release, `bench.py` waits out that
+  lease length. The library's ack confirms it; the gateway application sends nothing and moves.
+- **Report**: after its payloads the node sends a request on the point. The gateway answers with
+  its report (payloads counted, mean RSSI/SNR) and goes home. ESP-NOW and Zigbee runs end with
+  the same request, without the move.
+- **Lease**: if the request never arrives, the gateway goes home when the lease runs out. The
+  lease is an upper bound on the run (`configs.lease_seconds`), 44–140 s depending on the setting.
+- **Lost ack**: a missing ack for the switch means either the frame or its ack was lost. The node
+  therefore sends a probe on the point after every unacknowledged attempt and carries on if the
+  library acks it.
+- **Host side**: after a LoRa point whose request was not acknowledged, `bench.py` waits out that
   lease before starting the next LoRa point, because the gateway may still be deaf to home.
+
+All of these are confirmed by the same library ack as the data. The report is the only frame the
+gateway application ever sends.
 
 ## Duty cycle
 
 433 MHz allows 10 % per hour, 360 s of airtime per transmitter. One site costs the node about
-205 s (16 points, handshakes included), so **two sites inside one hour will make the second one
+200 s (16 points, handshakes included), so **two sites inside one hour will make the second one
 wait**; `bench.py` prints how long.
 
 - The firmware's own guard starts empty at every flash, so the host ledger
   (`results/lora_airtime_ledger.txt`, kept across runs) is what enforces the limit on the node. It
   paces at 9 %.
-- The gateway only sends 8-byte acks, so it uses far less airtime than the node. It still keeps
-  its own ledger across its whole uptime and does not send an ack it cannot afford.
+- The gateway sends only the library's header-only acks and one report per run, far less airtime
+  than the node. The library's own guard covers it; that guard starts empty whenever the gateway
+  retunes, which at this volume does not matter.
 
 ## Before trusting a result
 
@@ -69,7 +75,7 @@ wait**; `bench.py` prints how long.
    spread drift within a visit, but a link that changes with weather or with where you stand
    (findings §8, `liu2022`) needs the site revisited to show it. `--note` and the home RSSI
    recorded with every LoRa point are there to make such differences explicable afterwards.
-4. **Energy is the initiator's**, and includes waiting for pongs that never come. It is not
+4. **Energy is the sender's**, and includes waiting for acks that never come. It is not
    comparable with September's responder energy.
 5. **The gateway runs all three radios at once.** It is not metered, so no energy figure changes,
    but WiFi is receiving beside the XBee during Zigbee points, and the gateway draws on the order

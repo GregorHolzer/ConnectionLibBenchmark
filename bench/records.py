@@ -7,13 +7,12 @@ Parsing is defensive: a malformed line is skipped rather than aborting a day in 
 STATUS_NAMES = {0: "Ok", 1: "Timeout", 2: "DutyCycleExceeded", 3: "PayloadTooLarge",
                 4: "NotReady", 5: "Failed", 6: "Queued"}
 
-# One row per ping. `rssi_dbm` / `snr_db` are the node's reading of the pong; `gw_rssi_dbm` /
-# `gw_snr_db` are the gateway's reading of the ping, carried back in the pong. `gw_rx` is how many
-# pings of this run the gateway had received when it sent that pong.
-EXCHANGE_FIELDS = ["seq", "payload_bytes", "total_bytes", "send_us", "rtt_us", "status", "acked",
-                   "rssi_dbm", "snr_db", "gw_rx", "gw_rssi_dbm", "gw_snr_db", "duty_pct", "ok"]
-_FLOAT_FIELDS = {"rssi_dbm", "snr_db", "gw_rssi_dbm", "gw_snr_db", "duty_pct"}
-SUMMARY_FIELDS = ["sent", "answered", "gw_rx", "elapsed_ms", "duty_pct", "aborted"]
+# One row per payload. `latency_us` is the time spent in send(): from handing the payload to the
+# library until the library had its ack, or gave up. `acked` is that ack.
+EXCHANGE_FIELDS = ["seq", "payload_bytes", "total_bytes", "latency_us", "status", "acked",
+                   "duty_pct"]
+_FLOAT_FIELDS = {"duty_pct"}
+SUMMARY_FIELDS = ["sent", "acked", "elapsed_ms", "duty_pct", "aborted"]
 
 
 def _number(name, text):
@@ -29,9 +28,9 @@ def _fields(names, values):
 
 
 def parse(lines):
-    """Split the lines of one run into header, handshake, idle, exchanges and summary."""
+    """Split the lines of one run into header, handshake, idle, payloads, summary and report."""
     run = {"header": {}, "home": None, "idle_ms": None, "exchanges": [], "summary": None,
-           "release": None, "error": None, "complete": False}
+           "report": None, "error": None, "complete": False}
     for line in lines:
         kind, _, rest = line.partition(",")
         parts = rest.split(",") if rest else []
@@ -39,10 +38,8 @@ def parse(lines):
             if kind == "PPH" and len(parts) >= 2:
                 run["header"][parts[0]] = ",".join(parts[1:])
             elif kind == "HOME":
-                run["home"] = {"acked": parts[0] == "ok"}
-                if parts[0] == "ok":
-                    run["home"].update(rssi_dbm=_number("rssi_dbm", parts[1]),
-                                       snr_db=_number("snr_db", parts[2]), attempts=int(parts[3]))
+                run["home"] = {"acked": parts[0] == "ok",
+                               "attempts": int(parts[1]) if parts[0] == "ok" else None}
             elif kind == "IDLE" and parts[0] == "end":
                 run["idle_ms"] = int(parts[1])
             elif kind == "PPD":
@@ -51,8 +48,14 @@ def parse(lines):
                 run["exchanges"].append(exchange)
             elif kind == "PPS":
                 run["summary"] = _fields(SUMMARY_FIELDS, parts)
-            elif kind == "RELEASE":
-                run["release"] = parts[0]
+            elif kind == "REPORT":
+                # "requested": the gateway acked the request, so on LoRa it has gone home.
+                run["report"] = {"requested": parts[0] in ("ok", "lost"), "received": None,
+                                 "rssi_dbm": None, "snr_db": None}
+                if parts[0] == "ok":
+                    run["report"].update(received=int(parts[1]),
+                                         rssi_dbm=float(parts[2]) if parts[2] else None,
+                                         snr_db=float(parts[3]) if parts[3] else None)
             elif kind == "ERR":
                 run["error"] = rest
             elif kind == "END":
@@ -63,22 +66,20 @@ def parse(lines):
 
 
 def delivery(run):
-    """Packet delivery per direction, counted where the packet arrived.
+    """Delivery of one run, as the library confirmed it and as the gateway counted it.
 
-    Uplink is the gateway's own count of pings, as its pongs (or the final count request) carried
-    it back. Downlink is pongs received over pings the gateway answered. If no pong ever arrived
-    the gateway's count is unknown, and uplink is reported as None rather than as zero.
+    `pdr` is acked payloads over sent: what an application using the library would see.
+    `gateway_received` is the gateway's own count, from its report; it can exceed `acked`,
+    because a payload can arrive while its ack is lost. None when no report came back.
     """
-    summary = run["summary"]
+    summary, report = run["summary"], run["report"] or {}
     if not summary or not summary["sent"]:
-        return {"sent": 0, "answered": 0, "uplink_pdr": None, "downlink_pdr": None,
-                "round_trip_pdr": None}
-    sent, answered, gateway_rx = summary["sent"], summary["answered"], summary["gw_rx"]
-    heard = answered > 0 or gateway_rx > 0
+        return {"sent": 0, "acked": 0, "pdr": None, "gateway_received": None, "gateway_pdr": None}
+    received = report.get("received")
     return {
-        "sent": sent,
-        "answered": answered,
-        "uplink_pdr": min(gateway_rx / sent, 1.0) if heard else None,
-        "downlink_pdr": min(answered / gateway_rx, 1.0) if gateway_rx else None,
-        "round_trip_pdr": answered / sent,
+        "sent": summary["sent"],
+        "acked": summary["acked"],
+        "pdr": summary["acked"] / summary["sent"],
+        "gateway_received": received,
+        "gateway_pdr": None if received is None else min(received / summary["sent"], 1.0),
     }

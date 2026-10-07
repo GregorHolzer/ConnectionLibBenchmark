@@ -1,17 +1,21 @@
 /**
- * @brief Gateway firmware: flashed once, left in the field with no host, answers whatever arrives.
+ * @brief Gateway firmware: flashed once, left in the field with no host. It receives.
  *
- * ESP-NOW and Zigbee each have a single parameter set, so both stay up for good. LoRa hears only
- * one SF/BW at a time, so it waits on home (Config.hpp) and moves to a point when a node asks,
- * for at most the lease that came with the request. Whatever happens to the node, the gateway is
- * back on home when the lease runs out.
+ * Confirming delivery is the library's job, not this file's: listen() is all that is called for a
+ * data frame, and the radio or the library acks it (Frames.hpp). The application does three
+ * things on top:
  *
- * It keeps no log. Its count of received pings travels back in every pong (Frames.hpp), and what
- * it prints on serial is only for watching it on the desk.
+ *   - counts the data frames of the current run, and averages their RSSI/SNR where the radio
+ *     reports them;
+ *   - sends that as one report frame when the node asks for it after its run;
+ *   - moves LoRa between home and a point. ESP-NOW and Zigbee have a single parameter set and
+ *     stay up for good, but LoRa hears only one SF/BW at a time, so it waits on home
+ *     (Config.hpp), moves when a node asks, and is back on home when the node says so or the
+ *     lease that came with the request runs out.
+ *
+ * What it prints on serial is only for watching it on the desk.
  */
 #include <Arduino.h>
-
-#include <ConnectionLib/DutyCycleGuard.hpp>
 
 #include "Board.hpp"
 #include "Frames.hpp"
@@ -22,23 +26,22 @@ using namespace bench;
 
 namespace {
 
-std::unique_ptr<Transport> g_espNow, g_zigbee, g_lora;
+constexpr uint32_t kAckWaitOwnMs = 1000;   // for the gateway's one send, the report
 
-// The LoRa transport's own duty-cycle guard starts empty every time the radio is rebuilt, i.e. on
-// every switch. This one spans the gateway's whole uptime; a reply it cannot afford is not sent.
-DutyCycleGuard g_loraBudget({10.0f, 3'600'000});
-uint32_t g_lastLoRaAirMs = 0;
+std::unique_ptr<Transport> g_espNow, g_zigbee, g_lora;
 
 bool g_leased = false;
 uint32_t g_leaseStartMs = 0;
 uint32_t g_leaseMs = 0;
 
 uint8_t g_runId = 0;
-uint16_t g_received = 0;   // pings in the current run, probes excluded
+uint16_t g_received = 0;
+float g_rssiSum = 0, g_snrSum = 0;
+uint16_t g_readings = 0;
 
 void tuneLoRa(const LoRaParams &params, bool leased) {
     g_lora.reset();   // one radio: the old transport goes before the new one comes up
-    g_lora = makeLoRa(params);
+    g_lora = makeLoRa(params, kAckWaitOwnMs);
     bool ok = g_lora->setup();
     g_leased = leased;
     g_leaseStartMs = millis();
@@ -47,78 +50,57 @@ void tuneLoRa(const LoRaParams &params, bool leased) {
                   ok ? "ok" : "SETUP FAILED");
 }
 
-void reply(Transport &link, const Address &to, const uint8_t *frame, size_t len) {
-    bool isLoRa = &link == g_lora.get();
-    if (isLoRa && !g_loraBudget.canTransmit(millis(), g_lastLoRaAirMs)) {
-        Serial.println("DROP,duty cycle");
-        return;
-    }
-    uint32_t start = millis();
-    link.send(to, frame, len);
-    if (isLoRa) {
-        g_lastLoRaAirMs = millis() - start;
-        g_loraBudget.recordTransmission(start, g_lastLoRaAirMs);
-    }
-}
-
 /** @brief A switch request is honoured only inside the EU envelope the node was built against. */
 bool acceptable(const LoRaParams &p) {
     return p.spreadingFactor >= 7 && p.spreadingFactor <= 12 && p.codingRate >= 5 &&
            p.codingRate <= 8 && p.txPowerDbm <= 7 && (p.bandwidthKHz == 125 || p.bandwidthKHz == 250);
 }
 
+void countData(const ReceivedMessage &message) {
+    if (message.payload[3] != g_runId) {   // a new run: start counting again
+        g_runId = message.payload[3];
+        g_received = g_readings = 0;
+        g_rssiSum = g_snrSum = 0;
+    }
+    g_received++;
+    if (message.rssiDbm && message.snrDb) {
+        g_rssiSum += *message.rssiDbm;
+        g_snrSum += *message.snrDb;
+        g_readings++;
+    }
+}
+
 void serve(Transport &link) {
-    auto message = link.listen(0);
+    auto message = link.listen(0);   // on LoRa the library acks the frame in here
     if (!message || message->payload.size() < frames::kHeaderBytes) {
         return;
     }
     const auto &in = message->payload;
-    const uint16_t seq = frames::seqOf(in);
-    const uint8_t runId = in[3];
     const bool isLoRa = &link == g_lora.get();
-    uint8_t out[frames::kMaxBytes];
 
-    switch (in[0]) {
-        case 'P':
-            if (runId != g_runId) {
-                g_runId = runId;
-                g_received = 0;
-                Serial.printf("RUN,%u,%s\n", runId, link.technologyName());
-            }
-            if (seq != frames::kProbeSeq) {
-                g_received++;
-            }
-            // The ack is header-only whatever the payload was: data flows one way, node to
-            // gateway, and only the confirmation comes back.
-            frames::buildPong(out, frames::kHeaderBytes, seq, runId, g_received, message->rssiDbm,
-                              message->snrDb);
-            reply(link, message->source, out, frames::kHeaderBytes);
-            break;
-        case 'C': {
-            if (!isLoRa || in.size() < frames::kSwitchBytes) {
-                break;
-            }
-            LoRaParams point{in[frames::kBwKHz], in[frames::kSf], in[frames::kCr],
-                             static_cast<int8_t>(in[frames::kPower]), in[frames::kPreamble]};
-            if (!acceptable(point)) {
-                break;
-            }
-            frames::build(out, frames::kHeaderBytes, 'A', 0, runId);
-            reply(link, message->source, out, frames::kHeaderBytes);   // acked on home, then move
+    if (in[0] == 'D') {
+        countData(*message);
+    } else if (in[0] == 'R') {
+        frames::Report report;
+        report.received = in[3] == g_runId ? g_received : 0;
+        if (report.received && g_readings) {
+            report.rssiDbm = g_rssiSum / g_readings;
+            report.snrDb = g_snrSum / g_readings;
+        }
+        uint8_t out[frames::kHeaderBytes];
+        frames::buildReport(out, in[3], report);
+        link.send(message->source, out, sizeof(out));
+        Serial.printf("RUN,%u,%s,received %u\n", in[3], link.technologyName(), report.received);
+        if (isLoRa && g_leased) {
+            tuneLoRa(kHome, false);
+        }
+    } else if (in[0] == 'C' && isLoRa && in.size() >= frames::kSwitchBytes) {
+        LoRaParams point{in[frames::kBwKHz], in[frames::kSf], in[frames::kCr],
+                         static_cast<int8_t>(in[frames::kPower]), in[frames::kPreamble]};
+        if (acceptable(point)) {
             g_leaseMs = in[frames::kLease4s] * 4000UL;
             tuneLoRa(point, true);
-            break;
         }
-        case 'R':
-            if (!isLoRa) {
-                break;
-            }
-            frames::build(out, frames::kHeaderBytes, 'K', 0, runId);
-            reply(link, message->source, out, frames::kHeaderBytes);
-            if (g_leased) {
-                tuneLoRa(kHome, false);
-            }
-            break;
     }
 }
 

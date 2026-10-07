@@ -45,7 +45,7 @@ def render_header(config, peer_mac, gateway_xbee64, run_id):
         "BENCH_PAYLOAD": config.payload,
         "BENCH_EXCHANGES": config.exchanges,
         "BENCH_IDLE_MS": config.idle_ms,
-        "BENCH_REPLY_WAIT_MS": configs.reply_wait_ms(config),
+        "BENCH_ACK_WAIT_MS": configs.ack_wait_ms(config),
         "BENCH_LEASE_S": configs.lease_seconds(config),
         "BENCH_LORA_BW_KHZ": lora["bw"],
         "BENCH_LORA_SF": lora["sf"],

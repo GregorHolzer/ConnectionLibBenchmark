@@ -13,7 +13,7 @@ from . import airtime, board, configs, firmware, records
 
 NODE_ENV = "node"
 BOOT_ALLOWANCE_S = 30
-SEND_TIMEOUT_S = 2.0   # the longest any backend blocks in send(): ESP-NOW and Zigbee status waits
+SEND_TIMEOUT_S = 2.0   # ESP-NOW's and Zigbee's own status waits inside send(); airtime on LoRa
 
 
 class Runner:
@@ -34,19 +34,17 @@ class Runner:
     # -- timing bounds ---------------------------------------------------------------------
 
     def _airtimes_ms(self, config):
-        """(ping, header-only control frame) time-on-air at this point; zeros off LoRa."""
-        if config.tech != "lora":
-            return 0.0, 0.0
-        return (configs.ping_airtime_ms(config, self.lora_header_bytes),
-                configs.ack_airtime_ms(config, self.lora_header_bytes))
+        """(data frame, header-only control frame) time-on-air at this point; zeros off LoRa."""
+        return (configs.payload_airtime_ms(config, self.lora_header_bytes),
+                configs.control_airtime_ms(config, self.lora_header_bytes))
 
     def _timeout_s(self, config):
         """An upper bound on the run, so a hung board ends the point and not the day."""
-        reply_s = configs.reply_wait_ms(config) / 1000.0
+        wait_s = configs.ack_wait_ms(config) / 1000.0
         bound = BOOT_ALLOWANCE_S + config.idle_ms / 1000.0
-        bound += config.exchanges * (0.1 + SEND_TIMEOUT_S + reply_s)
+        bound += config.exchanges * (0.1 + SEND_TIMEOUT_S + wait_s)
         if config.tech == "lora" and config.exchanges:
-            bound += airtime.CONTROL_ATTEMPTS * (10 + 4 * reply_s)   # handshake, probes, release
+            bound += airtime.CONTROL_ATTEMPTS * (10 + 2 * wait_s)   # handshake and report
         return bound
 
     # -- one run ---------------------------------------------------------------------------
@@ -92,7 +90,8 @@ class Runner:
             self.power.close(window)
 
         run = records.parse(lines)
-        released = run["release"] == "ok"   # the gateway said it is going back to home
+        report = run["report"] or {}
+        released = bool(report.get("requested"))   # the gateway acked the request: it goes home
         clean = bool(released and run["home"] and run["home"]["acked"])
         if is_lora_point:
             pings = run["summary"]["sent"] if run["summary"] else len(run["exchanges"])
@@ -109,8 +108,8 @@ class Runner:
             "exchanges_planned": config.exchanges, "started_at": started_at,
             "run_id": self._run_id, "header": run["header"], "home": run["home"],
             "idle_ms": run["idle_ms"], "summary": run["summary"],
-            "delivery": records.delivery(run), "release": run["release"],
-            "energy": energy, "ping_airtime_ms": round(ping_ms, 2),
+            "delivery": records.delivery(run), "report": run["report"],
+            "energy": energy, "payload_airtime_ms": round(ping_ms, 2),
             "duty_wait_s": round(duty_wait_s, 1),
             "error": "timeout" if timed_out else run["error"], "complete": run["complete"],
         }
@@ -132,15 +131,15 @@ def describe(record):
     parts = []
     delivery = record["delivery"]
     if delivery["sent"]:
-        up, down = delivery["uplink_pdr"], delivery["downlink_pdr"]
-        parts.append(f"{delivery['answered']}/{delivery['sent']} answered")
-        parts.append("up " + ("?" if up is None else f"{up:.0%}"))
-        parts.append("down " + ("?" if down is None else f"{down:.0%}"))
+        parts.append(f"{delivery['acked']}/{delivery['sent']} delivered")
+        if delivery["gateway_received"] is not None:
+            parts.append(f"gateway counted {delivery['gateway_received']}")
         if record["summary"]["aborted"]:
             parts.append("stopped: 10 losses in a row")
     for name, window in record["energy"].items():
         if window:
             parts.append(f"{name} {window['mean_ua'] / 1000:.1f} mA")
-    if record["home"] and record["home"]["acked"] and record["home"]["rssi_dbm"] is not None:
-        parts.append(f"home {record['home']['rssi_dbm']:.0f} dBm")
+    report = record["report"] or {}
+    if report.get("rssi_dbm") is not None:
+        parts.append(f"{report['rssi_dbm']:.0f} dBm at the gateway")
     return ", ".join(parts) or "done"
