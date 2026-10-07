@@ -2,11 +2,13 @@
 
 How the benchmark runs when the boards are up to 2 km apart and only one of them has a computer.
 
-**No transfer has been made with this harness yet.** As of 2026-10-07 the firmware builds, the
-host code is unit-tested, and the node alone has been flashed, started and metered on the bench:
-idle holds, and an ESP-NOW run that correctly stopped at `HOME,noack` with no gateway present. The
-gateway image, the announcement and the transfer itself have not run on hardware. Do a desk run
-(`site --distance 0`) before the first trip, and read "Before trusting a result" below.
+**Run on the desk, not yet in the field.** On 2026-10-07, boards about 1 m apart
+(`results/desk-20261007`): Zigbee and ESP-NOW delivered 100/100, and 14 of 16 LoRa settings
+delivered in full. The gateway went WAIT → RUN → WAIT for every run. The LoRa link is still as
+weak as in September: −135 dBm and −12.5 dB SNR at one metre, and the two settings with the least
+margin (SF7, and 2 dBm transmit power) delivered nothing. Read "Before trusting a result" below.
+The RSSI column of that campaign is clamped at −127 dBm by a since-fixed encoding bug; its SNR is
+correct.
 
 ## Running one
 

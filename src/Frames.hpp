@@ -15,8 +15,8 @@
  *                 by the library's ack alone.
  *   'E' end       node -> gateway after the run: send your report and go back to home.
  *   'K' report    gateway -> node, the only frame the gateway application ever sends:
- *                 [4..5] data frames received in this run, [6] their mean RSSI in dBm,
- *                 [7] their mean SNR in quarter dB.
+ *                 [4..5] data frames received in this run, [6] their mean RSSI as a positive
+ *                 number of dB below 0 dBm (0: none reported), [7] their mean SNR in quarter dB.
  */
 #pragma once
 
@@ -32,7 +32,7 @@ namespace bench::frames {
 constexpr size_t kHeaderBytes = 8;     // also the smallest frame
 constexpr size_t kMaxBytes = 250;      // ESP-NOW's limit, the largest of the three
 constexpr size_t kConfigBytes = 11;
-constexpr int8_t kNoReading = 0;       // RSSI byte of a radio that reports none
+constexpr uint8_t kNoReading = 0;      // RSSI byte of a radio that reports none
 
 enum ConfigField : size_t {
     kSf = 4, kCr = 5, kPower = 6, kPreamble = 7, kBwKHz = 8, kLease4s = 9, kTechnology = 10
@@ -63,18 +63,20 @@ inline void buildReport(uint8_t *buf, uint8_t runId, const Report &report) {
     build(buf, kHeaderBytes, 'K', 0, runId);
     buf[4] = static_cast<uint8_t>(report.received & 0xFF);
     buf[5] = static_cast<uint8_t>(report.received >> 8);
-    auto toByte = [](float value) {
-        return static_cast<uint8_t>(static_cast<int8_t>(std::clamp(std::lround(value), -127L, 127L)));
-    };
-    buf[6] = report.rssiDbm ? toByte(*report.rssiDbm) : static_cast<uint8_t>(kNoReading);
-    buf[7] = report.snrDb ? toByte(*report.snrDb * 4.0f) : 0;
+    // RSSI as its magnitude, 1..255: LoRa decodes well below -127 dBm, which a signed byte
+    // cannot hold.
+    buf[6] = report.rssiDbm ? static_cast<uint8_t>(std::clamp(std::lround(-*report.rssiDbm), 1L, 255L))
+                            : kNoReading;
+    buf[7] = report.snrDb ? static_cast<uint8_t>(static_cast<int8_t>(
+                                std::clamp(std::lround(*report.snrDb * 4.0f), -127L, 127L)))
+                          : 0;
 }
 
 inline Report parseReport(const std::vector<uint8_t> &frame) {
     Report out;
     out.received = static_cast<uint16_t>(frame[4] | (frame[5] << 8));
-    if (static_cast<int8_t>(frame[6]) != kNoReading) {
-        out.rssiDbm = static_cast<int8_t>(frame[6]);
+    if (frame[6] != kNoReading) {
+        out.rssiDbm = -static_cast<float>(frame[6]);
         out.snrDb = static_cast<int8_t>(frame[7]) / 4.0f;
     }
     return out;
