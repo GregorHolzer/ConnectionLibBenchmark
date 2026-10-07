@@ -89,7 +89,7 @@ def summarise(runs, exchanges):
             "rtt_median_ci_us": median_confidence_interval(rtt),
             "send_us": describe(_numbers(rows, "send_us")),
             "ack_rate": _ratio(sum(1 for row in rows if row["acked"] == "1"), len(rows)),
-            # Stop-and-wait goodput: delivered payload bits over wall clock, not link capacity.
+            # One-way goodput of a back-to-back burst: confirmed payload bits over wall clock.
             "goodput_bps": _ratio(answered * first["params"].get("payload", 32) * 8, elapsed_s),
             "framing_efficiency": _ratio(sum(_numbers(rows, "payload_bytes")),
                                          sum(_numbers(rows, "total_bytes"))),

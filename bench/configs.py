@@ -16,7 +16,7 @@ is the budget: a factorial would be several hundred points against a 10 % duty c
 
 from dataclasses import dataclass, field
 
-from .airtime import LORA_HEADER_BYTES, time_on_air_ms
+from .airtime import CONTROL_FRAME_BYTES, LORA_HEADER_BYTES, time_on_air_ms
 
 IDLE_MS = 30_000   # long enough for the PPK2 to average over a stack's periodic housekeeping
 
@@ -91,7 +91,7 @@ def site_configs(techs=("zigbee", "espnow", "lora")):
 
 
 def ping_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
-    """Time-on-air of one ping (and of its pong, which is the same size). 0 off LoRa."""
+    """Time-on-air of one payload frame. 0 off LoRa."""
     if config.tech != "lora":
         return 0.0
     p = config.params
@@ -99,10 +99,19 @@ def ping_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
                           preamble=p["preamble"], header_bytes=header_bytes)
 
 
+def ack_airtime_ms(config, header_bytes=LORA_HEADER_BYTES):
+    """Time-on-air of the gateway's 8-byte ack, or of any header-only frame. 0 off LoRa."""
+    if config.tech != "lora":
+        return 0.0
+    p = config.params
+    return time_on_air_ms(CONTROL_FRAME_BYTES, sf=p["sf"], bw_khz=p["bw"], coding_rate=p["cr"],
+                          preamble=p["preamble"], header_bytes=header_bytes)
+
+
 def reply_wait_ms(config):
-    """How long the node waits for a pong. Must exceed the pong's own time-on-air, which at
-    SF12 / 84 B is 4.8 s: a fixed 2 s would score those points as total loss."""
-    return int(max(2000, 3 * ping_airtime_ms(config) + 1000))
+    """How long the node waits for an ack. Must exceed the ack's own time-on-air, which at SF12
+    is over a second; short otherwise, because every lost payload costs the whole wait."""
+    return int(max(1000, 3 * ack_airtime_ms(config) + 500))
 
 
 def lease_seconds(config):

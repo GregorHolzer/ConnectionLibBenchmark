@@ -37,12 +37,8 @@ class Runner:
         """(ping, header-only control frame) time-on-air at this point; zeros off LoRa."""
         if config.tech != "lora":
             return 0.0, 0.0
-        ping = configs.ping_airtime_ms(config, self.lora_header_bytes)
-        p = config.params
-        control = airtime.time_on_air_ms(
-            airtime.CONTROL_FRAME_BYTES, sf=p["sf"], bw_khz=p["bw"], coding_rate=p["cr"],
-            preamble=p["preamble"], header_bytes=self.lora_header_bytes)
-        return ping, control
+        return (configs.ping_airtime_ms(config, self.lora_header_bytes),
+                configs.ack_airtime_ms(config, self.lora_header_bytes))
 
     def _timeout_s(self, config):
         """An upper bound on the run, so a hung board ends the point and not the day."""

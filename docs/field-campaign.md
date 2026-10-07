@@ -41,7 +41,7 @@ else reaches it.
 - **Release**: after its pings the node sends a release on the point; the gateway acks and goes
   home.
 - **Lease**: if the release never arrives, the gateway goes home when the lease runs out. The
-  lease is an upper bound on the run (`configs.lease_seconds`), 68–272 s depending on the setting.
+  lease is an upper bound on the run (`configs.lease_seconds`), 44–180 s depending on the setting.
 - **Lost ack**: a missing switch ack means either the request or the ack was lost. The node
   therefore probes on the point after every unacknowledged attempt and carries on if answered.
 - **Host side**: after a LoRa point without an acknowledged release, `bench.py` waits out that
@@ -56,9 +56,8 @@ wait**; `bench.py` prints how long.
 - The firmware's own guard starts empty at every flash, so the host ledger
   (`results/lora_airtime_ledger.txt`, kept across runs) is what enforces the limit on the node. It
   paces at 9 %.
-- The gateway answers every ping with a frame of the same size. It keeps its own ledger across
-  its whole uptime and does not send a reply it cannot afford; the node sees that as a lost pong.
-  The 1 % of margin on the host is what keeps this from happening.
+- The gateway only sends 8-byte acks, so it uses far less airtime than the node. It still keeps
+  its own ledger across its whole uptime and does not send an ack it cannot afford.
 
 ## Before trusting a result
 

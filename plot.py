@@ -41,7 +41,7 @@ COMPARISON_PANELS = [
     ("Uplink delivery (node → gateway)", "PDR", lambda row: row["uplink_pdr"], False),
     ("Downlink delivery (gateway → node)", "PDR", lambda row: row["downlink_pdr"], False),
     ("Round-trip time, median", "ms", _median("rtt_us", 1e-3), True),
-    ("Goodput (stop-and-wait)", "bit/s", lambda row: row["goodput_bps"], True),
+    ("Goodput, one way (payload bits per second)", "bit/s", lambda row: row["goodput_bps"], True),
     ("Energy per delivered payload", "mJ", _energy("energy_per_delivered_mj"), True),
     ("… above the radio's standing current", "mJ", _energy("excess_energy_per_delivered_mj"), True),
     ("RSSI at the node", "dBm", _median("rssi_dbm"), False),

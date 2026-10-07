@@ -37,8 +37,8 @@ Host-side tests need no hardware: `python -m unittest discover tests`.
 
 ## How it measures
 
-Stop-and-wait ping-pong, started by the node. Ping N is sent once; the node waits for the pong
-with the same N, then sends N+1 at once. No retries, so delivery is simply counted. Results are
+A one-way transfer, node to gateway, as fast as the link allows. The node sends payload N once;
+the gateway confirms it with an 8-byte ack; the node sends N+1 the moment that ack is back. No retries, so delivery is simply counted. Results are
 kept in RAM and printed after the run, so the serial port is in neither the timings nor the energy. Each pong carries the
 gateway's running count of pings received, which is what splits a lost round trip into "ping
 lost" and "pong lost" without a host at the gateway. Details and every metric:

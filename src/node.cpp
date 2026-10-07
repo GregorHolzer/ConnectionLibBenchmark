@@ -1,12 +1,13 @@
 /**
  * @brief Node firmware: measures the one point it was built for, prints it, and stops.
  *
- * Stop-and-wait ping-pong: ping N is sent once, and N+1 follows as soon as pong N is back or its
- * wait ran out. No retries, no pause, and nothing printed until the run is over. Two times are
- * taken per exchange, both from an instant *before* send():
+ * A one-way transfer, as fast as the link allows: the node sends payload N ("ping"), the gateway
+ * confirms it with an 8-byte ack ("pong"), and N+1 follows as soon as that ack is back or its
+ * wait ran out. No retries, no pause, nothing printed until the run is over. Two times are taken
+ * per payload, both from an instant *before* send():
  *
  *   send_us   time blocked inside send()   (outbound airtime plus the radio's own status wait)
- *   rtt_us    until the matching pong is back in the application
+ *   rtt_us    until the gateway's ack for it is back in the application
  *
  * Records on serial, parsed by bench/records.py:
  *

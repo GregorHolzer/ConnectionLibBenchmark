@@ -73,7 +73,6 @@ void serve(Transport &link) {
         return;
     }
     const auto &in = message->payload;
-    const size_t len = std::min(in.size(), frames::kMaxBytes);
     const uint16_t seq = frames::seqOf(in);
     const uint8_t runId = in[3];
     const bool isLoRa = &link == g_lora.get();
@@ -89,8 +88,11 @@ void serve(Transport &link) {
             if (seq != frames::kProbeSeq) {
                 g_received++;
             }
-            frames::buildPong(out, len, seq, runId, g_received, message->rssiDbm, message->snrDb);
-            reply(link, message->source, out, len);   // same size as the ping
+            // The ack is header-only whatever the payload was: data flows one way, node to
+            // gateway, and only the confirmation comes back.
+            frames::buildPong(out, frames::kHeaderBytes, seq, runId, g_received, message->rssiDbm,
+                              message->snrDb);
+            reply(link, message->source, out, frames::kHeaderBytes);
             break;
         case 'C': {
             if (!isLoRa || in.size() < frames::kSwitchBytes) {

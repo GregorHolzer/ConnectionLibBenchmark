@@ -14,8 +14,8 @@ from pathlib import Path
 # SX1278 has no addressing. The raw firmware sends none of it, so it is a parameter.
 LORA_HEADER_BYTES = 6
 
-# Paced a little under the legal 10 %: the gateway answers every ping with a frame of the same
-# size from its own budget, and nothing but this ledger keeps the two in step.
+# Paced a little under the legal 10 %, as margin for the estimate. The gateway only sends 8-byte
+# acks, so its own budget is never the one that runs out first.
 DUTY_CYCLE_FRACTION = 0.09
 DUTY_CYCLE_WINDOW_S = 3600.0
 

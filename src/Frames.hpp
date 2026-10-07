@@ -1,12 +1,14 @@
 /**
  * @brief The frames the node and the gateway exchange. Nothing here talks to a radio.
  *
- * Every frame starts with the same four bytes and is padded to the configured payload size:
+ * Data flows one way: the node sends payloads, the gateway confirms each with a short ack.
+ * Every frame starts with the same four bytes; only the ping is padded to the payload size:
  *
  *   [0] kind   [1..2] sequence number, little-endian   [3] run id   [4..] kind-specific, padding
  *
- *   'P' ping      node -> gateway. Sequence kProbeSeq asks for the counters without being counted.
- *   'Q' pong      gateway -> node, same size as its ping: [4..5] pings the gateway has received in
+ *   'P' ping      node -> gateway: the payload. Sequence kProbeSeq asks for the counters without
+ *                 being counted.
+ *   'Q' pong      gateway -> node: the ack, always 8 bytes. [4..5] pings the gateway has received in
  *                 this run, [6] its RSSI of this ping in dBm, [7] its SNR in quarter dB.
  *   'C' switch    node -> gateway on home: the LoRa point to move to, see SwitchField.
  *   'A' 'R' 'K'   switch ack, release (node, on the point), release ack. Header only.

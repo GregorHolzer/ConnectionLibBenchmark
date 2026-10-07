@@ -12,7 +12,7 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 |---|---|---|---|
 | `rtt_us` | general | latency | Application send instant → application receive instant, for one request/response exchange. |
 | `send_us` | general | latency | Time blocked inside `Transport::send()`: the outbound transmission plus any backend status wait. |
-| Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. Stop-and-wait goodput, not link capacity. |
+| Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. One way, back to back; each payload waits for its ack. |
 | PDR (uplink, downlink, round trip) | domain | — | Packets received **at the receiver** ÷ sent, per direction. Each ping is sent once. See "Delivery" below. |
 | Ack rate | domain | — | Fraction of sends the backend reported acknowledged. |
 | Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
@@ -23,8 +23,11 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 
 ### The exchange, and delivery
 
-Stop-and-wait ping-pong, started by the node (`src/node.cpp`). Ping N is sent **once**; the node
-waits for the pong carrying the same N, then sends N+1 at once. There are no retries, so nothing a retry
+A one-way transfer from node to gateway, as fast as the link allows (`src/node.cpp`). The node
+sends payload N **once** (the "ping"), the gateway confirms it with an 8-byte ack (the "pong"),
+and the node sends N+1 the moment that ack is back. `rtt_us` is therefore the time from handing
+a payload to `send()` until its delivery is confirmed, and goodput is one-way payload bits per
+second of a back-to-back burst. There are no retries, so nothing a retry
 would have repaired is hidden, and a point costs the same airtime whether the link is good or bad.
 A point stops after 10 losses in a row and is recorded as out of range.
 
