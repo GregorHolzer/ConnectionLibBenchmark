@@ -73,8 +73,6 @@ class PowerMonitor:
         self._thread = None
         self.total_samples = 0
 
-    # -- construction ---------------------------------------------------------------------
-
     @classmethod
     def create(cls, port=None, voltage_mv=DEFAULT_VOLTAGE_MV, mode="source", raw_dir=None,
                log=print):
@@ -144,8 +142,6 @@ class PowerMonitor:
             time.sleep(POLL_INTERVAL_S)
         return FALLBACK_LATENCY_S
 
-    # -- lifecycle ------------------------------------------------------------------------
-
     def start(self):
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
@@ -194,8 +190,6 @@ class PowerMonitor:
                 window.max_ua = max(window.max_ua, batch_max)
                 if window.keep_raw and now - window.started_at - self.latency_s < MAX_RAW_SECONDS:
                     window.raw.extend(cleaned)
-
-    # -- windows --------------------------------------------------------------------------
 
     def open(self, label, keep_raw=False):
         """Start folding samples into a new window. `keep_raw` also keeps its first seconds."""
