@@ -3,12 +3,12 @@
 How the benchmark runs when the boards are up to 2 km apart and only one of them has a computer.
 
 **Run on the desk, not yet in the field.** On 2026-10-07, boards about 1 m apart
-(`results/desk-20261007`): Zigbee and ESP-NOW delivered 100/100, and 14 of 16 LoRa settings
-delivered in full. The gateway went WAIT → RUN → WAIT for every run. The LoRa link is still as
-weak as in September: −135 dBm and −12.5 dB SNR at one metre, and the two settings with the least
-margin (SF7, and 2 dBm transmit power) delivered nothing. Read "Before trusting a result" below.
-The RSSI column of that campaign is clamped at −127 dBm by a since-fixed encoding bug; its SNR is
-correct.
+(`results/desk-20261007`): Zigbee and ESP-NOW delivered 100/100, and the gateway went
+WAIT → RUN → WAIT for every run. LoRa was at first as weak as in September (−135 dBm, −12.5 dB SNR
+at one metre; SF7 and 2 dBm delivered nothing). That turned out to be the antennas: once they were
+mounted correctly the SF9 baseline read **−70 dBm and +11.5 dB SNR**, 20/20 delivered
+(`results/desk-20261007-antenna-check`). The LoRa rows of `desk-20261007` were recorded before
+that and should be re-run; their RSSI column is also clamped at −127 dBm by a since-fixed bug.
 
 ## Running one
 
@@ -78,18 +78,18 @@ wait**; `bench.py` prints how long.
 
 ## Before trusting a result
 
-1. **The LoRa transmit chain was broken in September** ([findings.md](findings.md) §4): the PA
-   drew no current and the desk link sat at −130 dBm. Unrepaired, every LoRa distance reads about
-   100 dB short. Check the node's current during an SF12 point on the PPK2 before going out.
-2. **Which XBee is the coordinator is unverified** since the boards swapped roles (findings §8).
+1. **Check the LoRa antennas before every trip.** The "broken transmit chain" of September
+   ([findings.md](findings.md) §4) was wrongly mounted antennas: about 70 dB of loss with
+   everything else working. A LoRa baseline run on the desk should report around −70 dBm at the
+   gateway; around −135 dBm means an antenna is not connected to the radio.
+2. **The gateway's XBee is `0013A20042035B39`**, confirmed by the desk run.
 3. **One visit is one sample.** There are no rotations. `--rounds 2` and the shuffled LoRa order
    spread drift within a visit, but a link that changes with weather or with where you stand
    (findings §8, `liu2022`) needs the site revisited to show it. `--note` and the home RSSI
    recorded with every LoRa point are there to make such differences explicable afterwards.
 4. **Energy is the sender's**, and includes waiting for acks that never come. It is not
    comparable with September's responder energy.
-5. **Nothing runs unless LoRa home reaches the gateway**, ESP-NOW and Zigbee runs included. With
-   the transmit chain of item 1 unrepaired, that is every run.
+5. **Nothing runs unless LoRa home reaches the gateway**, ESP-NOW and Zigbee runs included.
 6. **ESP-NOW and Zigbee stop within a few hundred metres.** Beyond that the config still
    arrives over LoRa, the loop ends after 10 losses in a row, and the point is recorded with zero
    delivery. That is the result at that distance, not a failure. It costs the lease, since the
