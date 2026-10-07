@@ -59,7 +59,8 @@ def _series(rows, value, log_y=False):
 def _style_axis(axis, title, ylabel, log_y, distances):
     axis.set_title(title, fontsize=10, loc="left")
     axis.set_ylabel(ylabel)
-    axis.set_xscale("log")
+    if distances and min(distances) > 0:   # a desk run at 0 m has no place on a log axis
+        axis.set_xscale("log")
     axis.set_xticks(distances)
     axis.set_xticklabels([f"{d:g}" for d in distances])
     axis.minorticks_off()
