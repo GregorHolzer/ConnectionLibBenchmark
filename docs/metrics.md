@@ -55,9 +55,11 @@ own ack, retries included. An unacknowledged LoRa payload costs the full ack wai
 (`configs.ack_wait_ms`, 1.0–2.7 s), which is why latency is reported for acknowledged payloads and
 the loss shows up in goodput and energy instead.
 
-The library polls for its acks in 1 ms steps (`delay(1)` in ESP-NOW's and LoRa's `send()`), so
-ESP-NOW latency is quantised to about a millisecond. That is the library's behaviour and is
-measured as such.
+ESP-NOW's `send()` blocks on a semaphore that the radio's send callback gives, so it returns when
+the MAC result is in. Until ConnectionLib `a9aba69` it polled for that in `delay(1)` steps and
+could only return on 1 ms tick boundaries, a large share of a ~3 ms exchange; the benchmark builds
+against the fixed version. LoRa's `send()` still checks for its ack once a millisecond, which is
+negligible against hundreds of milliseconds of airtime.
 
 ### Latency vs. throughput (practice P1)
 
