@@ -1,9 +1,9 @@
 /**
  * @brief Node firmware: measures the one point it was built for, prints it, and stops.
  *
- * The measurement is stop-and-wait ping-pong. The node sends ping N once, waits for the pong with
- * the same N, and only then sends N+1; there are no retries, so delivery is simply counted. Two
- * times are taken per exchange, both from an instant *before* send():
+ * Stop-and-wait ping-pong: ping N is sent once, and N+1 follows as soon as pong N is back or its
+ * wait ran out. No retries, no pause, and nothing printed until the run is over. Two times are
+ * taken per exchange, both from an instant *before* send():
  *
  *   send_us   time blocked inside send()   (outbound airtime plus the radio's own status wait)
  *   rtt_us    until the matching pong is back in the application
@@ -16,18 +16,20 @@
  *   IDLE,begin / IDLE,end,<ms>             the standing-current window
  *   RUN,begin / RUN,end                    the active-energy window: first ping to last pong
  *   PPD,<seq>,<payload>,<total>,<send_us>,<rtt_us>,<status>,<ack>,<rssi>,<snr>,
- *       <gw_rx>,<gw_rssi>,<gw_snr>,<duty_pct>,<ok>          one per ping
+ *       <gw_rx>,<gw_rssi>,<gw_snr>,<duty_pct>,<ok>          one per ping, printed after the run
  *   PPS,<sent>,<answered>,<gw_rx>,<elapsed_ms>,<duty_pct>,<aborted>
  *   RELEASE,ok | RELEASE,noack             LoRa only
  *   ERR,<reason>
  *   END                                    always last
  */
 #include <optional>
+#include <vector>
 
 #include <Arduino.h>
 
 #include "Board.hpp"
 #include "Frames.hpp"
+#include "NodeLoRa.hpp"
 #include "Transports.hpp"
 
 using namespace connectionlib;
@@ -35,25 +37,7 @@ using namespace bench;
 
 namespace {
 
-// listen(0) in a 200 us loop, not listen(waitMs): the library's blocking listen() sleeps in 1 ms
-// steps, which would quantise ESP-NOW's ~3.5 ms round trip into the harness's own ticks.
-constexpr uint32_t kPollIntervalUs = 200;
-constexpr uint32_t kMaxLossStreak = 10;     // this many losses in a row: out of range, stop
-constexpr uint32_t kHomeAckWaitMs = 5000;   // the ack is ~1.5 s of SF12 airtime
-constexpr uint32_t kSwitchGuardMs = 1000;   // the gateway rebuilds its radio after acking
-constexpr int kControlAttempts = 3;
-
-std::optional<ReceivedMessage> await(Transport &link, char kind, uint16_t seq, uint32_t waitMs) {
-    uint32_t start = millis();
-    while (millis() - start < waitMs) {
-        auto message = link.listen(0);
-        if (message && frames::matches(message->payload, kind, seq, kRunId)) {
-            return message;
-        }
-        delayMicroseconds(kPollIntervalUs);
-    }
-    return std::nullopt;
-}
+constexpr uint32_t kMaxLossStreak = 10;   // this many losses in a row: out of range, stop
 
 void printField(const std::optional<float> &value) {
     if (value) {
@@ -61,60 +45,6 @@ void printField(const std::optional<float> &value) {
     } else {
         Serial.print(',');
     }
-}
-
-/** @brief Send one header-only control frame and wait for the frame that answers it. */
-std::optional<ReceivedMessage> control(Transport &link, const uint8_t *frame, size_t len,
-                                       char answer, uint16_t seq, uint32_t waitMs) {
-    if (link.send(gatewayAddress(Tech::LoRa), frame, len).status != SendStatus::Ok) {
-        return std::nullopt;
-    }
-    return await(link, answer, seq, waitMs);
-}
-
-/**
- * @brief Tell the gateway, on home, which LoRa point comes next, then move `link` to that point.
- *
- * A missing ack is ambiguous: either the request was lost and the gateway is still on home, or
- * only the ack was lost and it has already moved. So each attempt ends with a probe on the point
- * itself, and an answer there counts as success.
- */
-bool negotiate(std::unique_ptr<Transport> &link) {
-    uint8_t frame[frames::kSwitchBytes];
-    frames::build(frame, sizeof(frame), 'C', 0, kRunId);
-    frame[frames::kSf] = kPoint.spreadingFactor;
-    frame[frames::kCr] = kPoint.codingRate;
-    frame[frames::kPower] = static_cast<uint8_t>(kPoint.txPowerDbm);
-    frame[frames::kPreamble] = kPoint.preambleLength;
-    frame[frames::kBwKHz] = kPoint.bandwidthKHz;
-    frame[frames::kLease4s] = static_cast<uint8_t>((kLeaseSeconds + 3) / 4);
-
-    uint8_t probe[frames::kHeaderBytes];
-    frames::build(probe, sizeof(probe), 'P', frames::kProbeSeq, kRunId);
-
-    for (int attempt = 0; attempt < kControlAttempts; attempt++) {
-        link.reset();   // one radio: the old transport goes before the new one comes up
-        link = makeLoRa(kHome);
-        auto ack = link->setup() ? control(*link, frame, sizeof(frame), 'A', 0, kHomeAckWaitMs)
-                                 : std::nullopt;
-        if (ack) {
-            Serial.print("HOME,ok");
-            printField(ack->rssiDbm);
-            printField(ack->snrDb);
-            Serial.printf(",%d\n", attempt + 1);
-        }
-        delay(kSwitchGuardMs);
-        link.reset();
-        link = makeLoRa(kPoint);
-        if (!link->setup()) {
-            return false;
-        }
-        if (ack || control(*link, probe, sizeof(probe), 'Q', frames::kProbeSeq, kReplyWaitMs)) {
-            return true;
-        }
-    }
-    Serial.println("HOME,noack");
-    return false;
 }
 
 void holdIdle(Transport *link) {
@@ -129,46 +59,52 @@ void holdIdle(Transport *link) {
     Serial.printf("IDLE,end,%lu\n", static_cast<unsigned long>(millis() - start));
 }
 
+/** @brief Everything recorded about one ping, kept in RAM until the run is over. */
+struct Exchange {
+    SendResult sent;
+    uint32_t sendUs, rttUs;
+    bool answered;
+    std::optional<float> rssiDbm, snrDb;   // the node's reading of the pong
+    frames::PongFields gateway;            // what the pong carried back
+    float dutyPercent;
+};
+
 void runExchanges(Transport &link) {
     const Address gateway = gatewayAddress(kTech);
     uint8_t ping[frames::kMaxBytes];
-    uint32_t sent = 0, answered = 0, lossStreak = 0;
+    std::vector<Exchange> log;
+    log.reserve(kExchanges);   // allocated up front: nothing but the radio happens in the loop
+    uint32_t lossStreak = 0;
     uint16_t gatewayRx = 0;
 
+    // Between RUN,begin and RUN,end the node only sends, waits and notes the result. Each ping
+    // follows the previous pong at once, and nothing is printed until the run is over, so the
+    // serial port is neither in the timings nor in the energy window.
     Serial.println("RUN,begin");
+    Serial.flush();
     uint32_t startMs = millis();
     for (uint32_t seq = 0; seq < kExchanges && lossStreak < kMaxLossStreak; seq++) {
-        delay(kSpacingMs);
         frames::build(ping, kPayloadBytes, 'P', static_cast<uint16_t>(seq), kRunId);
-
+        Exchange x{};
         uint32_t t0 = micros();
-        SendResult result = link.send(gateway, ping, kPayloadBytes);
-        uint32_t sendUs = micros() - t0;
+        x.sent = link.send(gateway, ping, kPayloadBytes);
+        x.sendUs = micros() - t0;
         std::optional<ReceivedMessage> pong;
-        if (result.status == SendStatus::Ok) {
+        if (x.sent.status == SendStatus::Ok) {
             pong = await(link, 'Q', static_cast<uint16_t>(seq), kReplyWaitMs);
         }
-        uint32_t rttUs = pong ? micros() - t0 : 0;
-
-        sent++;
-        answered += pong ? 1 : 0;
-        lossStreak = pong ? 0 : lossStreak + 1;
-        frames::PongFields fromGateway{gatewayRx, std::nullopt, std::nullopt};
+        x.rttUs = pong ? micros() - t0 : 0;
+        x.answered = pong.has_value();
+        x.gateway = {gatewayRx, std::nullopt, std::nullopt};
         if (pong) {
-            fromGateway = frames::pongFields(pong->payload);
-            gatewayRx = fromGateway.gatewayRx;
+            x.rssiDbm = pong->rssiDbm;
+            x.snrDb = pong->snrDb;
+            x.gateway = frames::pongFields(pong->payload);
+            gatewayRx = x.gateway.gatewayRx;
         }
-
-        Serial.printf("PPD,%lu,%u,%u,%lu,%lu,%d,%d", static_cast<unsigned long>(seq),
-                      static_cast<unsigned>(kPayloadBytes), static_cast<unsigned>(result.totalBytes),
-                      static_cast<unsigned long>(sendUs), static_cast<unsigned long>(rttUs),
-                      static_cast<int>(result.status), result.acknowledged ? 1 : 0);
-        printField(pong ? pong->rssiDbm : std::nullopt);
-        printField(pong ? pong->snrDb : std::nullopt);
-        Serial.printf(",%u", fromGateway.gatewayRx);
-        printField(fromGateway.rssiDbm);
-        printField(fromGateway.snrDb);
-        Serial.printf(",%.4f,%d\n", static_cast<double>(link.currentDutyCyclePercent()), pong ? 1 : 0);
+        x.dutyPercent = link.currentDutyCyclePercent();
+        lossStreak = pong ? 0 : lossStreak + 1;
+        log.push_back(x);
     }
     uint32_t elapsedMs = millis() - startMs;
     Serial.println("RUN,end");
@@ -184,23 +120,26 @@ void runExchanges(Transport &link) {
             break;
         }
     }
-    Serial.printf("PPS,%lu,%lu,%u,%lu,%.4f,%d\n", static_cast<unsigned long>(sent),
+
+    uint32_t answered = 0;
+    for (size_t seq = 0; seq < log.size(); seq++) {
+        const Exchange &x = log[seq];
+        answered += x.answered ? 1 : 0;
+        Serial.printf("PPD,%u,%u,%u,%lu,%lu,%d,%d", static_cast<unsigned>(seq),
+                      static_cast<unsigned>(kPayloadBytes), static_cast<unsigned>(x.sent.totalBytes),
+                      static_cast<unsigned long>(x.sendUs), static_cast<unsigned long>(x.rttUs),
+                      static_cast<int>(x.sent.status), x.sent.acknowledged ? 1 : 0);
+        printField(x.rssiDbm);
+        printField(x.snrDb);
+        Serial.printf(",%u", x.gateway.gatewayRx);
+        printField(x.gateway.rssiDbm);
+        printField(x.gateway.snrDb);
+        Serial.printf(",%.4f,%d\n", static_cast<double>(x.dutyPercent), x.answered ? 1 : 0);
+    }
+    Serial.printf("PPS,%u,%lu,%u,%lu,%.4f,%d\n", static_cast<unsigned>(log.size()),
                   static_cast<unsigned long>(answered), gatewayRx,
                   static_cast<unsigned long>(elapsedMs),
                   static_cast<double>(link.currentDutyCyclePercent()), aborted ? 1 : 0);
-}
-
-/** @brief Send the gateway back to home now, instead of letting it wait out the lease. */
-void release(Transport &link) {
-    uint8_t frame[frames::kHeaderBytes];
-    frames::build(frame, sizeof(frame), 'R', 0, kRunId);
-    for (int attempt = 0; attempt < kControlAttempts; attempt++) {
-        if (control(link, frame, sizeof(frame), 'K', 0, kReplyWaitMs)) {
-            Serial.println("RELEASE,ok");
-            return;
-        }
-    }
-    Serial.println("RELEASE,noack");
 }
 
 }   // namespace

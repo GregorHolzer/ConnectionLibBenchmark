@@ -38,7 +38,8 @@ Host-side tests need no hardware: `python -m unittest discover tests`.
 ## How it measures
 
 Stop-and-wait ping-pong, started by the node. Ping N is sent once; the node waits for the pong
-with the same N, then sends N+1. No retries, so delivery is simply counted. Each pong carries the
+with the same N, then sends N+1 at once. No retries, so delivery is simply counted. Results are
+kept in RAM and printed after the run, so the serial port is in neither the timings nor the energy. Each pong carries the
 gateway's running count of pings received, which is what splits a lost round trip into "ping
 lost" and "pong lost" without a host at the gateway. Details and every metric:
 [docs/metrics.md](docs/metrics.md). How the gateway follows LoRa settings, what a site costs in
@@ -49,6 +50,7 @@ duty cycle, and what limits the result: [docs/field-campaign.md](docs/field-camp
 | | |
 |---|---|
 | `src/node.cpp` | the measured loop; one configuration per build |
+| `src/NodeLoRa.cpp` | the node's side of the LoRa handshake |
 | `src/gateway.cpp` | the responder: all three radios up, LoRa on home until asked to move |
 | `src/Frames.hpp` | the frames the two exchange |
 | `src/Config.hpp` | the configuration macros and the EU envelope as `static_assert`s |

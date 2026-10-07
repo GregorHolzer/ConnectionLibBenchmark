@@ -108,8 +108,8 @@ def reply_wait_ms(config):
 def lease_seconds(config):
     """How long the gateway stays on a LoRa point if it never hears the release.
 
-    An upper bound on the run: every exchange's ping, a full reply wait, and the pause before it,
-    then the three count probes. Rounded up to the 4 s step the switch frame carries.
+    An upper bound on the run: every exchange's ping and a full reply wait, with 100 ms of slack
+    each, then the three count probes. Rounded up to the 4 s step the switch frame carries.
     """
     if config.tech != "lora" or config.exchanges == 0:
         return 0

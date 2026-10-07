@@ -55,7 +55,6 @@ constexpr uint32_t kExchanges = BENCH_EXCHANGES;
 constexpr uint32_t kIdleMs = BENCH_IDLE_MS;
 constexpr uint32_t kReplyWaitMs = BENCH_REPLY_WAIT_MS;
 constexpr uint32_t kLeaseSeconds = BENCH_LEASE_S;
-constexpr uint32_t kSpacingMs = 100;   // pause before every ping, so exchanges never overlap
 
 constexpr float kFrequencyMHz = 433.2f;
 constexpr LoRaParams kPoint{BENCH_LORA_BW_KHZ, BENCH_LORA_SF, BENCH_LORA_CR, BENCH_LORA_PWR,

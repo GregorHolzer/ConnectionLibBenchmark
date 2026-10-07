@@ -24,9 +24,13 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 ### The exchange, and delivery
 
 Stop-and-wait ping-pong, started by the node (`src/node.cpp`). Ping N is sent **once**; the node
-waits for the pong carrying the same N, then sends N+1. There are no retries, so nothing a retry
+waits for the pong carrying the same N, then sends N+1 at once. There are no retries, so nothing a retry
 would have repaired is hidden, and a point costs the same airtime whether the link is good or bad.
 A point stops after 10 losses in a row and is recorded as out of range.
+
+Nothing but the radio happens between `RUN,begin` and `RUN,end`: each exchange's figures go into a
+buffer in RAM and are printed once the run is over. The serial port is therefore in neither the
+timings nor the energy window, and there is no pause between exchanges.
 
 The gateway has no host, so its side of the count travels in the pong: every pong carries how many
 pings of this run the gateway has received so far (`gw_rx`), plus its own RSSI and SNR of that
