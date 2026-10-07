@@ -14,7 +14,7 @@
  *   PPH,<key>,<value>                      what this build is
  *   HOME,ok,<rssi>,<snr>,<attempts> | HOME,noack     LoRa only: the switch handshake on home
  *   IDLE,begin / IDLE,end,<ms>             the standing-current window
- *   RUN,begin                              the active-energy window opens; it closes at PPS
+ *   RUN,begin / RUN,end                    the active-energy window: first ping to last pong
  *   PPD,<seq>,<payload>,<total>,<send_us>,<rtt_us>,<status>,<ack>,<rssi>,<snr>,
  *       <gw_rx>,<gw_rssi>,<gw_snr>,<duty_pct>,<ok>          one per ping
  *   PPS,<sent>,<answered>,<gw_rx>,<elapsed_ms>,<duty_pct>,<aborted>
@@ -171,8 +171,8 @@ void runExchanges(Transport &link) {
         Serial.printf(",%.4f,%d\n", static_cast<double>(link.currentDutyCyclePercent()), pong ? 1 : 0);
     }
     uint32_t elapsedMs = millis() - startMs;
+    Serial.println("RUN,end");
     bool aborted = lossStreak >= kMaxLossStreak;
-
     // If the last pongs were lost the gateway's count is stale. Ask for it, outside the window.
     frames::build(ping, frames::kHeaderBytes, 'P', frames::kProbeSeq, kRunId);
     for (int attempt = 0; attempt < kControlAttempts && !aborted; attempt++) {

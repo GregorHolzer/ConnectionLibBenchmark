@@ -14,7 +14,7 @@ samples into running sums and discards them. Raw traces are kept only where a wa
 worth looking at - each technology's baseline point - because a few seconds
 showing the TX bursts makes a genuinely useful figure.
 
-**Windows are opened and closed by the runner**, on the `RUN,begin` / `PPS` and `IDLE` lines the
+**Windows are opened and closed by the runner**, on the `RUN,begin` / `RUN,end` and `IDLE` lines the
 node prints. Correlation is therefore exact by construction rather than a
 post-hoc timestamp alignment between two independent clocks, and no GPIO marker channel is needed:
 host-side windowing jitter is tens of milliseconds against points lasting seconds to minutes.

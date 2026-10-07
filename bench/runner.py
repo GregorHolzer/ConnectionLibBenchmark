@@ -77,7 +77,7 @@ class Runner:
             if not self.power:
                 return
             for name, opens, closes in (("idle", "IDLE,begin", "IDLE,end"),
-                                        ("run", "RUN,begin", "PPS,")):
+                                        ("run", "RUN,begin", "RUN,end")):
                 if line.startswith(opens):
                     keep_raw = name == "run" and config.name == "baseline"
                     label = f"{config.key}-{distance_m}m-r{round_index}"
