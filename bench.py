@@ -42,6 +42,9 @@ def parse_args():
                         help="directory under results/ (default: field-<today>)")
     parser.add_argument("--pio", default="pio")
     parser.add_argument("--no-power", action="store_true", help="run without the PPK2")
+    parser.add_argument("--ignore-duty-cycle", action="store_true",
+                        help="development only: do not wait between runs for the 433 MHz duty "
+                             "cycle. Airtime is still logged; the campaign is marked.")
     commands = parser.add_subparsers(dest="command", required=True)
 
     prepare = commands.add_parser("prepare", help="record the boards and flash the gateway")
@@ -102,6 +105,7 @@ def make_runner(args):
     writer = results.ResultWriter(out_dir)
     facts = firmware_facts(args.firmware)
     writer.write_meta({"campaign": args.campaign, "boards": boards, "firmware": facts,
+                       "duty_cycle_enforced": not args.ignore_duty_cycle,
                        "started_at": datetime.now().isoformat(timespec="seconds")})
     power = None if args.no_power else PowerMonitor.create(raw_dir=out_dir / "raw")
     if power is None and not args.no_power:
@@ -113,7 +117,9 @@ def make_runner(args):
         if time.time() > deadline:
             sys.exit(f"node port {boards['node_port']} did not appear")
         time.sleep(0.25)
-    budget = airtime.AirtimeBudget(LEDGER)
+    budget = airtime.AirtimeBudget(LEDGER, enforce=not args.ignore_duty_cycle)
+    if args.ignore_duty_cycle:
+        print("duty cycle NOT enforced between runs (--ignore-duty-cycle): development use only")
     runner = Runner(args.firmware, boards["node_port"], boards, writer, budget, power, args.pio,
                     facts["lora_header_bytes"])
     return runner, writer, power

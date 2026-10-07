@@ -70,7 +70,9 @@ class AirtimeBudget:
     uptime - refused 34 of 40 replies.
     """
 
-    def __init__(self, path, fraction=DUTY_CYCLE_FRACTION, window_s=DUTY_CYCLE_WINDOW_S):
+    def __init__(self, path, fraction=DUTY_CYCLE_FRACTION, window_s=DUTY_CYCLE_WINDOW_S,
+                 enforce=True):
+        self.enforce = enforce   # False: keep the ledger but never wait (bench.py --ignore-duty-cycle)
         self.window_s = window_s
         self.limit_s = fraction * window_s
         self._path = Path(path)
@@ -104,7 +106,7 @@ class AirtimeBudget:
     def wait_for(self, seconds, sleeper=time.sleep, log=print):
         """Block until `seconds` more airtime fits inside the window. Returns how long it waited."""
         waited = 0.0
-        while seconds > 0 and self.used() + seconds > self.limit_s:
+        while self.enforce and seconds > 0 and self.used() + seconds > self.limit_s:
             if not self._entries:
                 raise ValueError(f"{seconds:.0f} s of airtime can never fit in the duty cycle")
             pause = max(1.0, self._entries[0][0] + self.window_s - time.time() + 0.5)
