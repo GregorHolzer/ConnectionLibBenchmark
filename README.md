@@ -24,7 +24,7 @@ forest-sensor deployment.
 ./bench.py site --distance 100 --note "edge of the clearing, light rain"
 
 ./bench.py status                      # what has been recorded, as a table
-./plot.py --campaign field-<date>      # figures/<campaign>/comparison.png, lora_sweep.png
+./plot.py --campaign field-<date>      # figures/<campaign>/: technologies, lora_factors, latency_cdf
 ```
 
 `site` runs Zigbee, ESP-NOW, then 16 LoRa settings: 18 flashes, about 6 s of build and 15 s of
