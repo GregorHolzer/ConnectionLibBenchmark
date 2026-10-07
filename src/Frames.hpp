@@ -9,10 +9,11 @@
  *   [0] kind   [1..2] sequence number, little-endian   [3] run id   [4..] kind-specific, padding
  *
  *   'D' data      node -> gateway, padded to the configured payload size. The measured traffic.
- *   'C' switch    node -> gateway on LoRa home: the LoRa point to move to, see SwitchField.
- *   'N' probe     node -> gateway, header only: "are you on this LoRa point?" Answered by the
- *                 library's ack alone.
- *   'R' request   node -> gateway after the run: send your report, and (LoRa) go back to home.
+ *   'C' config    node -> gateway on LoRa home, before every run: which radio the run uses, its
+ *                 LoRa parameters, and how long the gateway may stay there. See ConfigField.
+ *   'N' probe     node -> gateway on the run's radio, header only: "did you switch?" Answered
+ *                 by the library's ack alone.
+ *   'E' end       node -> gateway after the run: send your report and go back to home.
  *   'K' report    gateway -> node, the only frame the gateway application ever sends:
  *                 [4..5] data frames received in this run, [6] their mean RSSI in dBm,
  *                 [7] their mean SNR in quarter dB.
@@ -30,10 +31,12 @@ namespace bench::frames {
 
 constexpr size_t kHeaderBytes = 8;     // also the smallest frame
 constexpr size_t kMaxBytes = 250;      // ESP-NOW's limit, the largest of the three
-constexpr size_t kSwitchBytes = 10;
+constexpr size_t kConfigBytes = 11;
 constexpr int8_t kNoReading = 0;       // RSSI byte of a radio that reports none
 
-enum SwitchField : size_t { kSf = 4, kCr = 5, kPower = 6, kPreamble = 7, kBwKHz = 8, kLease4s = 9 };
+enum ConfigField : size_t {
+    kSf = 4, kCr = 5, kPower = 6, kPreamble = 7, kBwKHz = 8, kLease4s = 9, kTechnology = 10
+};
 
 inline void build(uint8_t *buf, size_t len, char kind, uint16_t seq, uint8_t runId) {
     buf[0] = static_cast<uint8_t>(kind);

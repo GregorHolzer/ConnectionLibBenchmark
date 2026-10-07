@@ -19,8 +19,9 @@ std::unique_ptr<connectionlib::Transport> makeLoRa(const LoRaParams &params, uin
 std::unique_ptr<connectionlib::Transport> makeEspNow();
 std::unique_ptr<connectionlib::Transport> makeZigbee();
 
-/** @brief The transport for `tech` at this build's point, or nullptr for Tech::None. */
-std::unique_ptr<connectionlib::Transport> makeTransport(Tech tech);
+/** @brief The one transport a run uses: `tech`, and for LoRa these parameters. nullptr for None. */
+std::unique_ptr<connectionlib::Transport> makeTransport(Tech tech, const LoRaParams &lora,
+                                                        uint32_t loRaAckTimeoutMs);
 
 /** @brief Where the node sends. The gateway replies to whatever source it heard. */
 connectionlib::Address gatewayAddress(Tech tech);

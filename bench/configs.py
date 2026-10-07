@@ -7,10 +7,9 @@ One `Config` is one firmware build. There are two sets:
 * `site_configs()` - measured at every distance: one Zigbee point, one ESP-NOW point, and LoRa
   swept one factor at a time around its baseline.
 
-ESP-NOW and Zigbee get a single point because the gateway is flashed once and has no host: it
-listens on one WiFi channel and one XBee network for the whole campaign. LoRa is swept because it
-is the only radio that exposes its physical layer, and the gateway can follow a LoRa setting over
-the air (src/gateway.cpp). The sweep is one-factor-at-a-time rather than factorial because airtime
+ESP-NOW and Zigbee get a single point each; LoRa is swept because it is the only radio that
+exposes its physical layer. The gateway has no host: before every run the node tells it over
+LoRa home which radio and parameters come next (src/gateway.cpp). The sweep is one-factor-at-a-time rather than factorial because airtime
 is the budget: a factorial would be several hundred points against a 10 % duty cycle.
 """
 
@@ -119,13 +118,16 @@ def ack_wait_ms(config):
 
 
 def lease_seconds(config):
-    """How long the gateway stays on a LoRa point if it never hears the release.
+    """How long the gateway stays on a run's radio if it never hears the end message.
 
-    An upper bound on the run: every payload's airtime and a full ack wait, with 100 ms of slack
-    each, then the report. Rounded up to the 4 s step the switch frame carries.
+    An upper bound on the run. LoRa: every payload's airtime and a full ack wait, with 100 ms of
+    slack each, then the report; rounded up to the 4 s step the config frame carries. ESP-NOW and
+    Zigbee time their own acks and the loop stops after 10 losses in a row, so a fixed bound does.
     """
-    if config.tech != "lora" or config.exchanges == 0:
+    if config.exchanges == 0:
         return 0
+    if config.tech != "lora":
+        return {"espnow": 32, "zigbee": 60}[config.tech]
     per_exchange_ms = 100 + payload_airtime_ms(config) + ack_wait_ms(config)
     seconds = (config.exchanges + 3) * per_exchange_ms / 1000.0 + 15
     return min(1020, int(-(-seconds // 4) * 4))

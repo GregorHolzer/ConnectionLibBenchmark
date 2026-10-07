@@ -53,10 +53,11 @@ std::unique_ptr<Transport> makeZigbee() {
     return std::make_unique<ZigbeeTransport>(ZigbeeConfig{});
 }
 
-std::unique_ptr<Transport> makeTransport(Tech tech) {
+std::unique_ptr<Transport> makeTransport(Tech tech, const LoRaParams &lora,
+                                         uint32_t loRaAckTimeoutMs) {
     switch (tech) {
         case Tech::EspNow: return makeEspNow();
-        case Tech::LoRa: return makeLoRa(kPoint, kAckWaitMs);
+        case Tech::LoRa: return makeLoRa(lora, loRaAckTimeoutMs);
         case Tech::Zigbee: return makeZigbee();
         case Tech::None: break;
     }

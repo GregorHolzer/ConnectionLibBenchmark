@@ -20,9 +20,9 @@ LORA_HEADER_BYTES = 7
 DUTY_CYCLE_FRACTION = 0.09
 DUTY_CYCLE_WINDOW_S = 3600.0
 
-# src/Config.hpp kHome and src/Frames.hpp: the switch frame on home, and a header-only frame.
+# src/Config.hpp kHome and src/Frames.hpp: the config frame on home, and a header-only frame.
 HOME = {"sf": 12, "bw_khz": 125, "coding_rate": 8, "preamble": 8}
-SWITCH_FRAME_BYTES = 10
+SWITCH_FRAME_BYTES = 11
 CONTROL_FRAME_BYTES = 8
 CONTROL_ATTEMPTS = 3   # src/NodeControl.cpp kAttempts
 
@@ -46,14 +46,18 @@ def time_on_air_ms(payload_bytes, sf=9, bw_khz=125.0, coding_rate=7, preamble=8,
 
 def point_airtime_s(ping_ms, control_ms, pings, switch_attempts=CONTROL_ATTEMPTS, clean=False,
                     header_bytes=LORA_HEADER_BYTES):
-    """What one LoRa point costs the node: its payloads, the switch on home, and the header-only
-    frames on the point (probe, report request).
+    """LoRa airtime one run costs the node, whatever its technology.
 
-    With the defaults this is the upper bound, used to reserve airtime before a point runs and to
-    charge one that did not end cleanly; over-charging is the safe side. A clean point is charged
-    what it sent: `switch_attempts` switches and one report request.
+    Every run announces itself with a config frame on LoRa home, so ESP-NOW and Zigbee runs cost
+    that too; for them `ping_ms` and `control_ms` are 0. A LoRa run adds its payloads and the
+    header-only frames on the point (probe, end message).
+
+    With the defaults this is the upper bound, used to reserve airtime before a run and to charge
+    one that did not end cleanly; over-charging is the safe side. A clean run is charged what it
+    sent: `switch_attempts` config frames and one end message.
     """
-    switch_ms = time_on_air_ms(SWITCH_FRAME_BYTES, header_bytes=header_bytes, **HOME)
+    del header_bytes   # home always goes through the library, with its header
+    switch_ms = time_on_air_ms(SWITCH_FRAME_BYTES, **HOME)
     control_frames = 1 if clean else 2 * CONTROL_ATTEMPTS
     return (pings * ping_ms + switch_attempts * switch_ms + control_frames * control_ms) / 1000.0
 

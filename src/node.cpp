@@ -14,7 +14,7 @@
  *
  *   READY                                  booted; waits here for the host to send 'G'
  *   PPH,<key>,<value>                      what this build is
- *   HOME,ok,<attempts> | HOME,noack        LoRa only: the gateway was moved to this point
+ *   HOME,ok,<attempts> | HOME,noack        the gateway was told, on LoRa home, to serve this run
  *   IDLE,begin / IDLE,end,<ms>             the standing-current window
  *   RUN,begin / RUN,end                    the active-energy window: the loop and nothing else
  *   PPD,<seq>,<payload>,<total>,<latency_us>,<status>,<acked>,<duty_pct>     one per payload
@@ -99,9 +99,9 @@ void runTransfer(Transport &link) {
 void setup() {
     Serial.begin(115200);
     delay(500);
-    board::powerUp(kTech != Tech::EspNow);
+    board::begin();
     // Measure only when the host says so. A board that was merely powered up or reset must not
-    // start a LoRa handshake nobody is recording or charging to the duty cycle.
+    // announce itself over LoRa with nobody recording it or charging to the duty cycle.
     Serial.println("READY");
     while (Serial.read() != 'G') {
         delay(10);
@@ -110,10 +110,11 @@ void setup() {
 
     std::unique_ptr<Transport> link;
     bool ready = true;
-    if (kTech == Tech::LoRa && kExchanges > 0) {
-        ready = negotiate(link);
-    } else if (kTech != Tech::None) {
-        link = makeTransport(kTech);
+    if (kExchanges > 0) {
+        ready = announce(link);
+    } else if (kTech != Tech::None) {   // a standing-current hold: no gateway involved
+        board::loRaRail(kTech == Tech::LoRa);
+        link = makeTransport(kTech, kPoint, kAckWaitMs);
         ready = link->setup();
     }
 
@@ -128,7 +129,7 @@ void setup() {
         }
         if (link && kExchanges > 0) {
             runTransfer(*link);
-            collectReport(*link);
+            endRun(*link);
         }
     }
     Serial.println("END");

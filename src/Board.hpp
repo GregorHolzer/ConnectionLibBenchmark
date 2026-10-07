@@ -3,12 +3,18 @@
 
 namespace bench::board {
 
+/** @brief Bring the PMU up with the GPS rail and the LoRa rail off, and WiFi off. */
+void begin();
+
 /**
- * @brief Power the LoRa rail, cut the GPS rail, and optionally force WiFi off.
+ * @brief Power the SX1278 (AXP2101 ALDO2) or cut it.
  *
- * WiFi is forced off for everything except ESP-NOW so that no second 2.4 GHz radio sits under a
- * LoRa or Zigbee energy figure.
+ * Cut whenever LoRa is not the radio in use: a LoRaTransport that is merely destroyed leaves the
+ * chip in continuous receive, which would sit under every ESP-NOW and Zigbee energy figure.
  */
-void powerUp(bool wifiOff);
+void loRaRail(bool on);
+
+/** @brief Switch WiFi off again after an ESP-NOW transport has been destroyed. */
+void wifiOff();
 
 }   // namespace bench::board

@@ -1,8 +1,8 @@
 """Running one configuration: flash the node, let it measure, record what it printed.
 
 The gateway has no host, so everything known about it is inferred here. In particular, after a
-LoRa point that did not end with an acknowledged release the gateway may still be sitting on that
-point, deaf to home; the runner then waits out the lease before starting the next LoRa point.
+run whose end message was not acknowledged the gateway may still be sitting on that run's radio,
+deaf to home; the runner then waits out the lease before starting the next run.
 """
 
 import random
@@ -43,18 +43,18 @@ class Runner:
         wait_s = configs.ack_wait_ms(config) / 1000.0
         bound = BOOT_ALLOWANCE_S + config.idle_ms / 1000.0
         bound += config.exchanges * (0.1 + SEND_TIMEOUT_S + wait_s)
-        if config.tech == "lora" and config.exchanges:
-            bound += airtime.CONTROL_ATTEMPTS * (10 + 2 * wait_s)   # handshake and report
+        if config.exchanges:
+            bound += airtime.CONTROL_ATTEMPTS * (10 + 2 * wait_s)   # announcement and report
         return bound
 
     # -- one run ---------------------------------------------------------------------------
 
     def run(self, config, distance_m=None, round_index=0):
         """Flash `config`, capture its run, write it to the campaign. Returns the run record."""
-        is_lora_point = config.tech == "lora" and config.exchanges > 0
+        uses_gateway = config.exchanges > 0   # every such run starts with a frame on LoRa home
         ping_ms, control_ms = self._airtimes_ms(config)
         duty_wait_s = 0.0
-        if is_lora_point:
+        if uses_gateway:
             self._wait_for_gateway_home()
             duty_wait_s = self.budget.wait_for(
                 airtime.point_airtime_s(ping_ms, control_ms, config.exchanges,
@@ -91,9 +91,9 @@ class Runner:
 
         run = records.parse(lines)
         report = run["report"] or {}
-        released = bool(report.get("requested"))   # the gateway acked the request: it goes home
+        released = bool(report.get("requested"))   # the gateway acked the end message: it is home
         clean = bool(released and run["home"] and run["home"]["acked"])
-        if is_lora_point:
+        if uses_gateway:
             pings = run["summary"]["sent"] if run["summary"] else len(run["exchanges"])
             attempts = run["home"]["attempts"] if clean else airtime.CONTROL_ATTEMPTS
             charged = airtime.point_airtime_s(ping_ms, control_ms, pings, attempts, clean,
@@ -119,7 +119,7 @@ class Runner:
     def _wait_for_gateway_home(self):
         remaining = self._gateway_home_at - time.time()
         if remaining > 0:
-            self.log(f"  last LoRa point was not released; the gateway's lease runs out in "
+            self.log(f"  the last run was not ended at the gateway; its lease runs out in "
                      f"{remaining:.0f} s, waiting")
             time.sleep(remaining)
 

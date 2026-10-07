@@ -4,7 +4,8 @@ Distance benchmark for [ConnectionLib](https://github.com/GregorHolzer/Connectio
 and ESP-NOW on two LilyGO T-Beams, measured at a series of distances (10 m … 2 km) for the FORTE
 forest-sensor deployment.
 
-- The **gateway** is flashed once, placed, and left alone. It has no host and only answers.
+- The **gateway** is flashed once, placed, and left alone. It has no host. It waits on a fixed
+  LoRa setting until the node announces a run, then serves only that run's radio.
 - The **node** stays with the laptop and the PPK2. `bench.py` re-flashes it for every
   configuration, starts it, and records what it prints.
 
@@ -54,9 +55,9 @@ duty cycle, and what limits the result: [docs/field-campaign.md](docs/field-camp
 | | |
 |---|---|
 | `src/node.cpp` | the measured loop; one configuration per build |
-| `src/NodeControl.cpp` | around the loop: move the gateway to a LoRa point, collect its report |
-| `src/gateway.cpp` | the receiver: all three radios up, LoRa on home until asked to move |
-| `src/Frames.hpp` | the application frames: data, LoRa switch, report |
+| `src/NodeControl.cpp` | around the loop: announce the run to the gateway, end it, take the report |
+| `src/gateway.cpp` | the receiver: WAIT on LoRa home, RUN on the one radio a config named |
+| `src/Frames.hpp` | the application frames: data, config, end, report |
 | `src/Config.hpp` | the configuration macros and the EU envelope as `static_assert`s |
 | `src/Transports.cpp` | the only file that names a ConnectionLib backend |
 | `bench.py` | the command line |

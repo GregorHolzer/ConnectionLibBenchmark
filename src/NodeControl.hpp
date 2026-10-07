@@ -1,6 +1,6 @@
 /**
- * @brief The node's side of everything around the measured loop: moving the gateway to a LoRa
- * point, and collecting its report afterwards (see gateway.cpp).
+ * @brief The node's side of everything around the measured loop: telling the gateway which run
+ * comes next, and ending it (see gateway.cpp).
  */
 #pragma once
 
@@ -11,21 +11,23 @@
 namespace bench {
 
 /**
- * @brief Tell the gateway, on home, which LoRa point comes next, then move `link` to that point.
+ * @brief Announce this build's configuration to the gateway on LoRa home, then bring up the
+ * run's own transport in `link`.
  *
- * The switch frame is confirmed by the library's ack. A missing ack is ambiguous: either the
+ * The announcement is confirmed by the library's ack. A missing ack is ambiguous: either the
  * frame was lost and the gateway is still on home, or only the ack was lost and it has already
- * moved. So each attempt ends with a probe on the point itself, and an ack there counts as
+ * switched. So each attempt ends with a probe on the run's radio, and an ack there counts as
  * success. Prints HOME,ok,<attempts> or HOME,noack.
  */
-bool negotiate(std::unique_ptr<connectionlib::Transport> &link);
+bool announce(std::unique_ptr<connectionlib::Transport> &link);
 
 /**
- * @brief After the run: ask the gateway what it received, which on LoRa also sends it home.
+ * @brief After the run: tell the gateway it is over, which sends it back to home, and take its
+ * report.
  *
- * Prints REPORT,ok,<received>,<rssi>,<snr>, REPORT,lost (the request was acked, so the gateway is
- * released, but its report did not arrive), or REPORT,noack.
+ * Prints REPORT,ok,<received>,<rssi>,<snr>, REPORT,lost (the end message was acked, so the
+ * gateway is back on home, but its report did not arrive), or REPORT,noack.
  */
-void collectReport(connectionlib::Transport &link);
+void endRun(connectionlib::Transport &link);
 
 }   // namespace bench

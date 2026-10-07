@@ -66,6 +66,15 @@ class Configs(unittest.TestCase):
         self.assertLessEqual(configs.lease_seconds(slow), 1020)
         self.assertEqual(configs.lease_seconds(slow) % 4, 0)
 
+    def test_every_run_has_a_lease_and_costs_a_config_frame_on_home(self):
+        for config in configs.site_configs():
+            self.assertGreater(configs.lease_seconds(config), 0)
+            self.assertEqual(configs.lease_seconds(config) % 4, 0)
+        self.assertEqual(configs.lease_seconds(configs.baseline_configs()[0]), 0)
+        # An ESP-NOW run sends nothing on 433 MHz except its announcement.
+        self.assertAlmostEqual(airtime.point_airtime_s(0, 0, 100, 1, True),
+                               airtime.time_on_air_ms(11, **airtime.HOME) / 1000)
+
     def test_one_site_fits_in_an_hour_of_duty_cycle(self):
         total = sum(airtime.point_airtime_s(configs.payload_airtime_ms(c), 200, c.exchanges, 1, True)
                     for c in configs.lora_configs())

@@ -7,23 +7,40 @@
 
 namespace bench::board {
 
-void powerUp(bool wifiOff) {
-    // ALDO2 feeds the SX1278 and is off at boot. ALDO3 feeds the GPS, which this firmware never
-    // uses: it has to be switched off explicitly, because the AXP2101 keeps its rail state across
-    // an ESP32 reset and tens of milliamps of GPS would sit under every energy figure.
-    static XPowersAXP2101 pmu(Wire);
+namespace {
+XPowersAXP2101 g_pmu(Wire);
+}   // namespace
+
+void begin() {
+    // Both rails are switched explicitly: the AXP2101 keeps its rail state across an ESP32 reset,
+    // so whatever ran before would otherwise decide what is powered now. ALDO3 feeds the GPS,
+    // which this firmware never uses; tens of milliamps of it would sit under every figure.
     Wire.begin(21, 22);
-    if (pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, 21, 22)) {
-        pmu.setALDO2Voltage(3300);
-        pmu.enableALDO2();
-        pmu.disableALDO3();
-    } else {
+    if (!g_pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, 21, 22)) {
         Serial.println("ERR,pmu not found");
     }
-    if (wifiOff) {
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
+    g_pmu.disableALDO3();
+    loRaRail(false);
+    wifiOff();
+}
+
+void loRaRail(bool on) {
+    if (on) {
+        g_pmu.setALDO2Voltage(3300);
+        g_pmu.enableALDO2();
+        delay(20);   // let the rail settle before the radio is reset and configured
+    } else {
+        // Release the radio's pins first, or they would feed the unpowered chip through its inputs.
+        for (int pin : {5, 19, 27, 18, 23, 26}) {
+            pinMode(pin, INPUT);
+        }
+        g_pmu.disableALDO2();
     }
+}
+
+void wifiOff() {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
 }
 
 }   // namespace bench::board

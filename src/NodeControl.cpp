@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "Board.hpp"
 #include "Frames.hpp"
 #include "Transports.hpp"
 
@@ -12,39 +13,43 @@ namespace bench {
 namespace {
 
 constexpr int kAttempts = 3;
-constexpr uint32_t kSwitchGuardMs = 1000;   // the gateway rebuilds its radio after a switch
+constexpr uint32_t kSwitchGuardMs = 1000;   // the gateway brings its radio up after a config
 
-bool sendControl(Transport &link, const uint8_t *frame, size_t len) {
-    return link.send(gatewayAddress(kTech), frame, len).acknowledged;
-}
-
-void retune(std::unique_ptr<Transport> &link, const LoRaParams &params, uint32_t ackTimeoutMs) {
-    link.reset();   // one radio: the old transport goes before the new one comes up
-    link = makeLoRa(params, ackTimeoutMs);
-    link->setup();
+bool acked(Transport &link, Tech tech, const uint8_t *frame, size_t len) {
+    return link.send(gatewayAddress(tech), frame, len).acknowledged;
 }
 
 }   // namespace
 
-bool negotiate(std::unique_ptr<Transport> &link) {
-    uint8_t request[frames::kSwitchBytes];
-    frames::build(request, sizeof(request), 'C', 0, kRunId);
-    request[frames::kSf] = kPoint.spreadingFactor;
-    request[frames::kCr] = kPoint.codingRate;
-    request[frames::kPower] = static_cast<uint8_t>(kPoint.txPowerDbm);
-    request[frames::kPreamble] = kPoint.preambleLength;
-    request[frames::kBwKHz] = kPoint.bandwidthKHz;
-    request[frames::kLease4s] = static_cast<uint8_t>((kLeaseSeconds + 3) / 4);
+bool announce(std::unique_ptr<Transport> &link) {
+    uint8_t config[frames::kConfigBytes];
+    frames::build(config, sizeof(config), 'C', 0, kRunId);
+    config[frames::kSf] = kPoint.spreadingFactor;
+    config[frames::kCr] = kPoint.codingRate;
+    config[frames::kPower] = static_cast<uint8_t>(kPoint.txPowerDbm);
+    config[frames::kPreamble] = kPoint.preambleLength;
+    config[frames::kBwKHz] = kPoint.bandwidthKHz;
+    config[frames::kLease4s] = static_cast<uint8_t>((kLeaseSeconds + 3) / 4);
+    config[frames::kTechnology] = static_cast<uint8_t>(kTech);
 
     uint8_t probe[frames::kHeaderBytes];
     frames::build(probe, sizeof(probe), 'N', 0, kRunId);
 
     for (int attempt = 0; attempt < kAttempts; attempt++) {
-        retune(link, kHome, kHomeAckWaitMs);
-        bool acked = sendControl(*link, request, sizeof(request));
+        link.reset();   // one radio at a time: the old transport goes before the next comes up
+        board::loRaRail(true);
+        link = makeLoRa(kHome, kHomeAckWaitMs);
+        bool announced = link->setup() && acked(*link, Tech::LoRa, config, sizeof(config));
+        link.reset();
+        if (kTech != Tech::LoRa) {
+            board::loRaRail(false);   // or the SX1278 would keep receiving under the whole run
+        }
         delay(kSwitchGuardMs);
-        retune(link, kPoint, kAckWaitMs);
-        if (acked || sendControl(*link, probe, sizeof(probe))) {
+        link = makeTransport(kTech, kPoint, kAckWaitMs);
+        if (!link->setup()) {
+            return false;
+        }
+        if (announced || acked(*link, kTech, probe, sizeof(probe))) {
             Serial.printf("HOME,ok,%d\n", attempt + 1);
             return true;
         }
@@ -53,12 +58,12 @@ bool negotiate(std::unique_ptr<Transport> &link) {
     return false;
 }
 
-void collectReport(Transport &link) {
+void endRun(Transport &link) {
     uint8_t request[frames::kHeaderBytes];
-    frames::build(request, sizeof(request), 'R', 0, kRunId);
+    frames::build(request, sizeof(request), 'E', 0, kRunId);
     bool requested = false;
     for (int attempt = 0; attempt < kAttempts && !requested; attempt++) {
-        requested = sendControl(link, request, sizeof(request));
+        requested = acked(link, kTech, request, sizeof(request));
     }
     // The report is the one frame that travels gateway -> node. listen() is what lets the
     // library ack it on LoRa.

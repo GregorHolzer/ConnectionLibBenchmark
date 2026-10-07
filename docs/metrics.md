@@ -34,8 +34,8 @@ delivery, or has given up waiting for it:
 | Zigbee | the APS ack, reported in the module's TX status frame |
 | LoRa | ConnectionLib's software ack (`CONNECTIONLIB_LORA_ACK`): the receiver's `listen()` answers with a bare header, and `send()` waits for it |
 
-The benchmark adds no acknowledgement of its own. The gateway application calls `listen()` and
-counts. There are no retries at the benchmark level, so nothing a retry would have repaired is
+The benchmark adds no acknowledgement of its own. During a run the gateway has exactly one radio
+up, the one under test, and its loop is `listen()` and a counter. There are no retries at the benchmark level, so nothing a retry would have repaired is
 hidden (ESP-NOW and Zigbee retry inside the radio, which is part of what they are). A point stops
 after 10 losses in a row and is recorded as out of range.
 
@@ -81,6 +81,10 @@ constant.** A battery-terminal tap at a mid-discharge 3.9 V would model a deploy
 rail more directly and exclude that overhead. Whether it is usable here is untested: it depends on
 whether the CH9102F bridge draws from the board's 3.3 V rail or from USB VBUS, and if the latter,
 a battery tap with VBUS cut leaves no serial link for the campaign to be driven over.
+
+The SX1278's rail is cut whenever LoRa is not the radio in use, on both boards: the board floor
+and every ESP-NOW and Zigbee figure are taken with the LoRa chip unpowered (69.5 mA floor against
+75.9 mA with LoRa in receive, node on the bench, 2026-10-07).
 
 The board is **stripped for these measurements**: the GPS rail (ALDO3) is disabled in firmware and
 the OLED is not compiled in. Neither is used by the benchmark, so both were purely constant loads —
