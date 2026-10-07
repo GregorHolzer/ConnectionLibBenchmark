@@ -12,15 +12,37 @@ ones; low-level PHY counters are largely unavailable, which is itself a finding.
 |---|---|---|---|
 | `rtt_us` | general | latency | Application send instant → application receive instant, for one request/response exchange. |
 | `send_us` | general | latency | Time blocked inside `Transport::send()`: the outbound transmission plus any backend status wait. |
-| Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. |
-| PDR (uplink, downlink) | domain | — | Distinct sequence numbers received **at the receiver** ÷ sent. Counted per direction. In the field, where the gateway has no host, see [field-campaign.md](field-campaign.md). |
-| Retries / first-attempt success | domain | — | Exchanges completed without retransmission. |
+| Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. Stop-and-wait goodput, not link capacity. |
+| PDR (uplink, downlink, round trip) | domain | — | Packets received **at the receiver** ÷ sent, per direction. Each ping is sent once. See "Delivery" below. |
 | Ack rate | domain | — | Fraction of sends the backend reported acknowledged. |
 | Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
 | Duty cycle | domain | — | Airtime consumed against the rolling-window budget. |
-| RSSI / SNR | low-level | — | LoRa both, at no cost. ESP-NOW RSSI and Zigbee RSSI only under `--rssi`; neither exposes SNR at all. See below. |
+| RSSI / SNR | low-level | — | LoRa only, at both ends, at no cost. See below. |
 | **Energy per delivered payload** | domain | — | Measured with a Nordic PPK2 source-metering the **node**'s battery rail at 3.9 V. See below. |
-| **Standing current** | domain | — | Mean current with the radio configured but idle — very likely the figure that decides battery life. |
+| **Standing current** | domain | — | Mean current with the radio configured but idle — very likely the figure that decides battery life. Measured once, by `bench.py baseline`. |
+
+### The exchange, and delivery
+
+Stop-and-wait ping-pong, started by the node (`src/node.cpp`). Ping N is sent **once**; the node
+waits for the pong carrying the same N, then sends N+1. There are no retries, so nothing a retry
+would have repaired is hidden, and a point costs the same airtime whether the link is good or bad.
+A point stops after 10 losses in a row and is recorded as out of range.
+
+The gateway has no host, so its side of the count travels in the pong: every pong carries how many
+pings of this run the gateway has received so far (`gw_rx`), plus its own RSSI and SNR of that
+ping. After the last ping the node asks for the final count up to three times, outside the timed
+window, so a lost last pong does not understate it.
+
+- **Uplink PDR** = `gw_rx` ÷ pings sent.
+- **Downlink PDR** = pongs received ÷ `gw_rx`.
+- **Round-trip PDR** = pongs received ÷ pings sent.
+
+If no pong arrives at all, the gateway's count is unknown: uplink and downlink are then reported
+as unknown, not as zero, and only the round trip is zero. If the final count request also goes
+unanswered, `gw_rx` is the last value seen and uplink is a lower bound.
+
+The reply wait polls `listen(0)` every 200 µs rather than calling `listen(timeout)`: the library's
+blocking `listen()` sleeps in 1 ms steps, which would quantise ESP-NOW's ~3.5 ms round trip.
 
 ### Why `rtt_us` and `send_us` are separate
 
@@ -64,11 +86,16 @@ the OLED is not compiled in. Neither is used by the benchmark, so both were pure
 harmless for latency, but for energy they sit under every measurement and compress exactly the
 per-technology differences the comparison exists to resolve.
 
+The metered board is the **initiator**. Its active window runs from the first ping to the last
+pong or timeout, so it includes waiting for pongs that never come: energy per delivered payload
+rises as the link degrades, which is what a deployed node would pay. The September bench
+campaigns metered the responder instead and are not comparable.
+
 Three quantities, and the difference between them matters:
 
 | | What it answers |
 |---|---|
-| **Board floor** (`tech=none`, idle) | what the ESP32 costs with every radio down |
+| **Board floor** (`none/floor`: every radio down) | what the ESP32 costs with every radio down |
 | **Standing current** (radio configured, idle) | what this radio costs while merely *able* to receive |
 | **Energy per delivered payload** (active) | what moving a message costs |
 
@@ -84,64 +111,38 @@ receive at an order of magnitude less.
 other. Absolute battery life needs a duty-cycled sleep model layered on top, since a real satellite
 spends almost all its time asleep and this benchmark spends none of it.
 
-### Signal quality, and why capturing it is opt-in
+### Signal quality
 
-`--rssi` on either runner turns on per-packet signal quality. It is off by default, and the default
-is the point: the three radios charge very different prices for the same number.
+Only LoRa reports it. RadioLib reads RSSI and SNR out of the chip for a packet that already
+arrived, at no cost, so every answered exchange records both ends: `rssi_dbm` / `snr_db` are the
+node's reading of the pong, `gw_rssi_dbm` / `gw_snr_db` the gateway's reading of the ping. Every
+LoRa point also records the RSSI and SNR of the gateway's switch ack on home, the same SF12 link
+at every point, which shows how a site's link margin moved during the visit.
 
-| | RSSI | SNR | Cost of capturing it |
-|---|---|---|---|
-| LoRa | ✅ always | ✅ always | none — RadioLib reads both out of the chip for a packet that already arrived |
-| ESP-NOW | ✅ under `--rssi` | ❌ none exists | a promiscuous-mode sniffer running alongside, which hands every data frame on the channel to the CPU |
-| Zigbee | ✅ under `--rssi` | ❌ none exists | a `DB` AT query per receive: a UART round trip at 9600 baud, inside the window `poll()` is timed over |
+ESP-NOW and Zigbee record none. Getting it costs a promiscuous-mode sniffer on ESP-NOW and a `DB`
+AT query per packet on Zigbee, both of which move the latency and energy figures; the opt-in
+capture that did this exists only on an unmerged ConnectionLib branch and is not in the library
+version this benchmark builds against. Neither radio exposes SNR at all.
 
-The ESP-NOW and Zigbee routes both perturb exactly the energy and latency figures this bench
-exists to produce, so a campaign run with `--rssi` measures a different system from one run
-without. `meta.json` records `rssi_capture` for every campaign, which is what stops the two being
-pooled by accident.
-
-The ESP-NOW sniffer is needed because this Arduino core is on IDF 4.4, whose ESP-NOW receive
-callback takes the legacy three arguments and carries no `rx_ctrl`; the native
-`esp_now_recv_info_t->rx_ctrl->rssi` arrived in IDF 5.x.
-
-**In `raw.csv`, `rssi_dbm` and `snr_db` describe the reply this board received**, not the send.
-Signal quality is a receive-side quantity and no backend populates `SendResult`'s copies of it,
-which is why those columns were empty in every campaign recorded before this was fixed — the
-firmware was printing fields that nothing ever wrote.
-
-None of this promotes RSSI or SNR to a comparison axis. They stay observed metrics, for the
-reasons in ConnectionLib's `docs/measurement-methodology.md` §4.
-
-The field campaign keeps the pong a plain echo instead of carrying the gateway's readings back;
-[field-campaign.md](field-campaign.md) says why.
+RSSI and SNR stay observed metrics, not comparison axes, for the reasons in ConnectionLib's
+`docs/measurement-methodology.md` §4.
 
 ## The no-library baseline
 
-`stack=raw` runs the same exchange straight onto the vendor API — RadioLib's `SX1278`,
-`esp_now.h`, xbee-arduino's `ZBTxRequest` — with ConnectionLib out of the path. The exposé asks
-for results that keep what the library contributes separable from what the radios contribute, and
-this is the other half of that subtraction.
+[ConnectionLibBenchmarkRaw](https://github.com/GregorHolzer/ConnectionLibBenchmarkRaw) runs the
+same node and gateway firmware on the vendor APIs — RadioLib's `SX1278`, `esp_now.h`,
+xbee-arduino's `ZBTxRequest` — with ConnectionLib out of the path. `src/Transports.cpp` is the
+only file that differs, so the measured loop, the timing points and the records are the same code.
+Its README lists what each raw transport bypasses. It is a separate pass with its own gateway
+image, because a raw LoRa frame has no header for a library gateway to recognise.
 
-The raw transports implement the same `Transport` interface, so `runGatewayPoint` measures both
-arms with the same code, the same timing points and the same records; only `send()` and `poll()`
-differ. Each technology sweeps the raw arm across the common payload range, because the library's
-cost is not constant in relative terms. Time-on-air is quantised into symbols, so the header
-costs a near-fixed **+28.7 ms per transmission** at the SF9/BW125/CR4:7 baseline — 14.5 % of an
-8-byte exchange, 4.2 % of an 84-byte one. (Its share of *bytes on air* is the larger 43 % at
-8 bytes; the two are different quantities and only the airtime one drives energy.)
-
-| | bypassed | kept |
-|---|---|---|
-| LoRa | the 6-byte `FrameHeader`, `Address` translation | duty-cycle enforcement |
-| ESP-NOW | `Address` translation, the receive ring buffer | — |
-| Zigbee | `Address` translation, the send-window RX buffering | — |
-
-**Duty-cycle enforcement stays in the raw LoRa arm.** It is a regulatory control rather than a
-library feature under test, and docs/regulations.md is explicit that the EU envelope is never
-relaxed for benchmarking convenience. The raw-versus-library delta is therefore framing,
-addressing and queueing — not duty-cycle logic, and that has to be said with the result.
+On LoRa the library's 6-byte header costs airtime in whole symbols: a near-fixed +28.7 ms per
+transmission at the SF9 / 125 kHz / 4:7 baseline, 14.5 % of an 8-byte exchange and 4.2 % of an
+84-byte one (September bench measurement, [findings.md](findings.md)).
 
 ## Not measured — and why
+
+**Retries.** There are none, by design; see "The exchange, and delivery".
 
 These are asked for by the thesis exposé's RQ1 metric set. They are listed here, and printed by
 the analysis tooling, rather than silently omitted.
@@ -173,7 +174,8 @@ out. The literature each metric rests on is tabulated there and derived in full 
 ## Aggregation (practice P11)
 
 Single numbers are **medians**, never means, and always accompanied by a spread. Per-exchange
-samples are kept in `raw.csv` so any other statistic can be recomputed without re-running.
+samples are kept in `exchanges.csv` so any other statistic can be recomputed without re-running.
+Rounds at the same distance are pooled (`bench/summary.py`).
 
 Following the slides' guidance on choosing the function for the question:
 

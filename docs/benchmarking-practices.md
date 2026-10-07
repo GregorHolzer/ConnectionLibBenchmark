@@ -4,9 +4,11 @@ Summary of **"Performance-Oriented Computing — Experimentation"**, Peter Thoma
 Innsbruck (`02_experimentation.pdf`, 28 slides, 2023). The slides are course material and are not
 redistributed in this repository; slide numbers below refer to that deck.
 
-This is not only a summary. Every practice is written as a **checkable statement with an ID**, and
-[`verify_practices.py`](../verify_practices.py) enforces each one against the benchmark and its
-output. When a check fails, it names the practice ID, so the finding points back here.
+Every practice is written as a **checkable statement with an ID**. The *Here:* remarks describe
+the September 2026 bench harness and its audit script `verify_practices.py`, both of which were
+removed in the flash-per-configuration refactor (git history, `117a3f8`). The practices themselves
+still bind the distance benchmark; which of them it can no longer show by repetition is said in
+[field-campaign.md](field-campaign.md).
 
 ---
 

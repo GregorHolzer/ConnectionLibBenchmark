@@ -13,4 +13,8 @@ results/
 
 # Generated figures, same reasoning as results/: reproducible from a campaign with
 # plot_results.py / plot_comparison.py, so the campaign is the artefact worth keeping, not the PNG.
-figures/
+/figures/
+
+# Written by bench.py for every flash, and by `bench.py prepare` for this pair of boards.
+include/bench_config.h
+boards.json

@@ -1,0 +1,27 @@
+/**
+ * @brief Building the transport for a technology, and the address of the other board.
+ *
+ * Transports.cpp is the only file that names a backend. ConnectionLibBenchmarkRaw replaces it with
+ * one that builds the raw vendor-API transports; node.cpp and gateway.cpp are the same in both.
+ */
+#pragma once
+
+#include <memory>
+
+#include <ConnectionLib/Transport.hpp>
+
+#include "Config.hpp"
+
+namespace bench {
+
+std::unique_ptr<connectionlib::Transport> makeLoRa(const LoRaParams &params);
+std::unique_ptr<connectionlib::Transport> makeEspNow();
+std::unique_ptr<connectionlib::Transport> makeZigbee();
+
+/** @brief The transport for `tech` at this build's point, or nullptr for Tech::None. */
+std::unique_ptr<connectionlib::Transport> makeTransport(Tech tech);
+
+/** @brief Where the node sends its pings. The gateway replies to whatever source it heard. */
+connectionlib::Address gatewayAddress(Tech tech);
+
+}   // namespace bench

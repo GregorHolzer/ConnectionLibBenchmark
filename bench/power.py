@@ -7,15 +7,15 @@ board.
 
 Two design decisions worth knowing:
 
-**Accumulate, do not store.** The PPK2 streams at ~100 kSa/s. A ten-hour campaign is ~14 GB of raw
+**Accumulate, do not store.** The PPK2 streams at ~100 kSa/s. A day in the field is gigabytes of raw
 samples, which is both unwieldy and pointless: what the analysis needs per configuration point is a
 mean current, a charge and a peak, not three billion individual readings. The polling thread folds
 samples into running sums and discards them. Raw traces are kept only where a waveform is actually
-worth looking at - the first repetition of each technology's baseline - because a few seconds
+worth looking at - each technology's baseline point - because a few seconds
 showing the TX bursts makes a genuinely useful figure.
 
-**Windows are opened and closed by the campaign runner**, around the same instants it already
-records as `started_at`/`finished_at`. Correlation is therefore exact by construction rather than a
+**Windows are opened and closed by the runner**, on the `RUN,begin` / `PPS` and `IDLE` lines the
+node prints. Correlation is therefore exact by construction rather than a
 post-hoc timestamp alignment between two independent clocks, and no GPIO marker channel is needed:
 host-side windowing jitter is tens of milliseconds against points lasting seconds to minutes.
 
@@ -44,8 +44,7 @@ MAX_RAW_SECONDS = 8.0   # cap on any single retained waveform
 
 @dataclass
 class Window:
-    point_key: str
-    rotation: int
+    label: str
     started_at: float
     keep_raw: bool = False
     samples: int = 0
@@ -68,7 +67,6 @@ class PowerMonitor:
         self._windows = []
         self._stop = threading.Event()
         self._thread = None
-        self._seen_baselines = set()
         self.total_samples = 0
 
     # -- construction ---------------------------------------------------------------------
@@ -171,13 +169,10 @@ class PowerMonitor:
 
     # -- windows --------------------------------------------------------------------------
 
-    def open(self, point_key, rotation):
-        keep_raw = False
-        if self._raw_dir and "/baseline/" in point_key and point_key not in self._seen_baselines:
-            self._seen_baselines.add(point_key)
-            keep_raw = True   # one waveform per technology baseline, on its first repetition only
-        window = Window(point_key=point_key, rotation=rotation, started_at=time.time(),
-                         keep_raw=keep_raw)
+    def open(self, label, keep_raw=False):
+        """Start folding samples into a new window. `keep_raw` also keeps its first seconds."""
+        window = Window(label=label, started_at=time.time(),
+                        keep_raw=keep_raw and self._raw_dir is not None)
         with self._lock:
             self._windows.append(window)
         return window
@@ -214,12 +209,11 @@ class PowerMonitor:
 
     def _write_raw(self, window):
         self._raw_dir.mkdir(parents=True, exist_ok=True)
-        safe = window.point_key.replace("/", "_") or "unnamed"
-        path = self._raw_dir / f"{safe}-rot{window.rotation}.csv"
+        path = self._raw_dir / (window.label.replace("/", "_") + ".csv")
         # Sample index rather than a timestamp per row: the PPK2's rate is fixed, so the index and
         # the recorded duration reconstruct the time axis exactly and at a fraction of the size.
         with path.open("w") as handle:
-            handle.write(f"# point={window.point_key} rotation={window.rotation}\n")
+            handle.write(f"# window={window.label}\n")
             handle.write(f"# duration_s={window.finished_at - window.started_at:.4f} "
                           f"samples={len(window.raw)} voltage_mv={self.voltage_mv}\n")
             handle.write("sample_index,current_ua\n")

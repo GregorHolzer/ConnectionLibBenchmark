@@ -1,98 +1,84 @@
-"""Parsing the firmware's PP* records, and the raw CSV schema they land in.
+"""Parsing the node's serial records (src/node.cpp) into one result per run.
 
-Parsing is defensive by design. The Zigbee path interleaves raw XBee API frame bytes into the
-serial stream, so a line may contain binary before the record starts and may be truncated after
-it; a malformed record is skipped rather than aborting a ten-hour campaign.
+Parsing is defensive: a malformed line is skipped rather than aborting a day in the field.
 """
 
+# connectionlib::SendStatus
 STATUS_NAMES = {0: "Ok", 1: "Timeout", 2: "DutyCycleExceeded", 3: "PayloadTooLarge",
-                4: "NotReady", 5: "Failed"}
+                4: "NotReady", 5: "Failed", 6: "Queued"}
 
-# One row per gateway send attempt, successes and failures alike.
-#
-# `rssi_dbm` / `snr_db` describe the **reply this board received**, not the send. Signal quality is
-# a receive-side quantity and no backend populates SendResult's copies of it, which is why these
-# columns were empty in every campaign recorded before that was fixed - the firmware was printing
-# fields nothing ever wrote. LoRa fills both from the chip at no cost; ESP-NOW fills rssi only when
-# `rssi=1` puts a promiscuous sniffer alongside, and Zigbee only when `rssi=1` buys a `DB` AT query.
-RAW_COLUMNS = [
-    "run_index", "rotation", "tech", "factor", "level", "point_key",
-    "started_at", "seq", "attempt", "payload_bytes", "total_bytes",
-    "send_us", "rtt_us", "status", "status_name", "acked", "rssi_dbm", "snr_db",
-    "duty_pct", "ok",
-]
-
-# One row per arrival observed at the receiver - the only place PDR can honestly be counted.
-NODE_COLUMNS = [
-    "run_index", "rotation", "tech", "factor", "level", "point_key",
-    "seq", "payload_bytes", "total_bytes", "rssi_dbm", "snr_db",
-]
+# One row per ping. `rssi_dbm` / `snr_db` are the node's reading of the pong; `gw_rssi_dbm` /
+# `gw_snr_db` are the gateway's reading of the ping, carried back in the pong. `gw_rx` is how many
+# pings of this run the gateway had received when it sent that pong.
+EXCHANGE_FIELDS = ["seq", "payload_bytes", "total_bytes", "send_us", "rtt_us", "status", "acked",
+                   "rssi_dbm", "snr_db", "gw_rx", "gw_rssi_dbm", "gw_snr_db", "duty_pct", "ok"]
+_FLOAT_FIELDS = {"rssi_dbm", "snr_db", "gw_rssi_dbm", "gw_snr_db", "duty_pct"}
+SUMMARY_FIELDS = ["sent", "answered", "gw_rx", "elapsed_ms", "duty_pct", "aborted"]
 
 
-def _optional_float(text):
-    return float(text) if text else None
+def _number(name, text):
+    if text == "":
+        return None
+    return float(text) if name in _FLOAT_FIELDS else int(text)
 
 
-def parse_records(records):
-    """Split a list of raw record strings into header / exchanges / summary / node data."""
-    header, exchanges, summary, node_rx, node_summary = {}, [], None, [], None
+def _fields(names, values):
+    if len(values) != len(names):
+        raise ValueError("wrong field count")
+    return {name: _number(name, value) for name, value in zip(names, values)}
 
-    for record in records:
-        fields = record.split(",")
-        kind = fields[0]
+
+def parse(lines):
+    """Split the lines of one run into header, handshake, idle, exchanges and summary."""
+    run = {"header": {}, "home": None, "idle_ms": None, "exchanges": [], "summary": None,
+           "release": None, "error": None, "complete": False}
+    for line in lines:
+        kind, _, rest = line.partition(",")
+        parts = rest.split(",") if rest else []
         try:
-            if kind == "PPH" and len(fields) >= 3:
-                header[fields[1]] = ",".join(fields[2:]).strip()
-            elif kind == "PPD" and len(fields) >= 13:
-                exchanges.append({
-                    "seq": int(fields[1]),
-                    "attempt": int(fields[2]),
-                    "payload_bytes": int(fields[3]),
-                    "total_bytes": int(fields[4]),
-                    "send_us": int(fields[5]),
-                    "rtt_us": int(fields[6]),
-                    "status": int(fields[7]),
-                    "acked": int(fields[8]),
-                    "rssi_dbm": _optional_float(fields[9]),
-                    "snr_db": _optional_float(fields[10]),
-                    "duty_pct": float(fields[11]),
-                    "ok": int(fields[12]),
-                })
-            elif kind == "PPS" and len(fields) >= 8:
-                summary = {
-                    "successes": int(fields[1]),
-                    "attempts": int(fields[2]),
-                    "retries": int(fields[3]),
-                    "elapsed_ms": int(fields[4]),
-                    "duty_pct": float(fields[5]),
-                    "send_us_total": int(fields[6]),
-                    "duty_blocked": int(fields[7]),
-                }
-            elif kind == "PPN" and len(fields) >= 6:
-                node_rx.append({
-                    "seq": int(fields[1]),
-                    "payload_bytes": int(fields[2]),
-                    "total_bytes": int(fields[3]),
-                    "rssi_dbm": _optional_float(fields[4]),
-                    "snr_db": _optional_float(fields[5]),
-                })
-            elif kind == "PPI" and len(fields) >= 4:
-                summary = {
-                    "idle": True,
-                    "tech": fields[1],
-                    "elapsed_ms": int(fields[2]),
-                    "polls": int(fields[3]),
-                    "successes": 0, "attempts": 0, "retries": 0,
-                    "duty_pct": 0.0, "send_us_total": 0, "duty_blocked": 0,
-                }
-            elif kind == "PPM" and len(fields) >= 5:
-                node_summary = {
-                    "rx_distinct": int(fields[1]),
-                    "rx_total": int(fields[2]),
-                    "replies_ok": int(fields[3]),
-                    "reply_failures": int(fields[4]),
-                }
+            if kind == "PPH" and len(parts) >= 2:
+                run["header"][parts[0]] = ",".join(parts[1:])
+            elif kind == "HOME":
+                run["home"] = {"acked": parts[0] == "ok"}
+                if parts[0] == "ok":
+                    run["home"].update(rssi_dbm=_number("rssi_dbm", parts[1]),
+                                       snr_db=_number("snr_db", parts[2]), attempts=int(parts[3]))
+            elif kind == "IDLE" and parts[0] == "end":
+                run["idle_ms"] = int(parts[1])
+            elif kind == "PPD":
+                exchange = _fields(EXCHANGE_FIELDS, parts)
+                exchange["status_name"] = STATUS_NAMES.get(exchange["status"], "?")
+                run["exchanges"].append(exchange)
+            elif kind == "PPS":
+                run["summary"] = _fields(SUMMARY_FIELDS, parts)
+            elif kind == "RELEASE":
+                run["release"] = parts[0]
+            elif kind == "ERR":
+                run["error"] = rest
+            elif kind == "END":
+                run["complete"] = True
         except (ValueError, IndexError):
-            continue   # corrupted by interleaved binary; drop this record only
+            continue
+    return run
 
-    return header, exchanges, summary, node_rx, node_summary
+
+def delivery(run):
+    """Packet delivery per direction, counted where the packet arrived.
+
+    Uplink is the gateway's own count of pings, as its pongs (or the final count request) carried
+    it back. Downlink is pongs received over pings the gateway answered. If no pong ever arrived
+    the gateway's count is unknown, and uplink is reported as None rather than as zero.
+    """
+    summary = run["summary"]
+    if not summary or not summary["sent"]:
+        return {"sent": 0, "answered": 0, "uplink_pdr": None, "downlink_pdr": None,
+                "round_trip_pdr": None}
+    sent, answered, gateway_rx = summary["sent"], summary["answered"], summary["gw_rx"]
+    heard = answered > 0 or gateway_rx > 0
+    return {
+        "sent": sent,
+        "answered": answered,
+        "uplink_pdr": min(gateway_rx / sent, 1.0) if heard else None,
+        "downlink_pdr": min(answered / gateway_rx, 1.0) if gateway_rx else None,
+        "round_trip_pdr": answered / sent,
+    }
