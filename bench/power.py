@@ -5,19 +5,13 @@ header pin (left header pin 10, return on pin 9) at 5.0 V, while the campaign ru
 USB cable whose VBUS conductor has been cut, so the host carries data but cannot also power the
 board.
 
-Two design decisions worth knowing:
+**Accumulate, do not store.** The PPK2 streams tens of thousands of samples a second; what the
+analysis needs per window is a mean current, a charge and a peak. The polling thread folds samples
+into running sums and discards them. A raw trace is kept only for each technology's baseline run.
 
-**Accumulate, do not store.** The PPK2 streams at ~100 kSa/s. A day in the field is gigabytes of raw
-samples, which is both unwieldy and pointless: what the analysis needs per configuration point is a
-mean current, a charge and a peak, not three billion individual readings. The polling thread folds
-samples into running sums and discards them. Raw traces are kept only where a waveform is actually
-worth looking at - each technology's baseline point - because a few seconds
-showing the TX bursts makes a genuinely useful figure.
-
-**Windows are opened and closed by the runner**, on the `RUN,begin` / `RUN,end` and `IDLE` lines the
-node prints. Correlation is therefore exact by construction rather than a
-post-hoc timestamp alignment between two independent clocks, and no GPIO marker channel is needed:
-host-side windowing jitter is tens of milliseconds against points lasting seconds to minutes.
+**Windows are opened and closed by the runner**, on the `RUN,begin` / `RUN,end` and `IDLE` lines
+the node prints, and shifted by the stream's measured latency (see FALLBACK_LATENCY_S). No GPIO
+marker channel is needed; what is left is a few tens of milliseconds at each edge.
 
 Everything here is optional. If the package is missing or no PPK2 is attached, `PowerMonitor.create`
 returns None and the campaign runs exactly as before, without energy columns.
@@ -33,13 +27,20 @@ from pathlib import Path
 
 from .ppk2_port import find_port, port_holder, recover_streaming
 
-# The 5 V header pin feeds the same net as USB VBUS, so the board sees what a USB supply would
-# give it. This must match the rail actually being sourced: energy_mj is charge times this
-# voltage, so a mismatch scales every energy figure silently.
+# Must match the rail actually sourced: energy is charge times this voltage.
 DEFAULT_VOLTAGE_MV = 5000
 
-POLL_INTERVAL_S = 0.05
+# The reader must drain the PPK2 faster than it fills, and one read returns at most 4095 bytes.
+# At the 50 ms this used to be, four fifths of the stream queued up and every window held samples
+# from about 2 s *before* it was opened.
+POLL_INTERVAL_S = 0.001
 MAX_RAW_SECONDS = 8.0   # cap on any single retained waveform
+
+# The PPK2's stream reaches the host about half a second after the current it describes. A window
+# therefore takes the samples that *arrive* between its two instants shifted by that latency,
+# which create() measures from how long switching the board on takes to show up in the stream.
+FALLBACK_LATENCY_S = 0.55
+POWER_ON_UA = 20_000    # the board draws well above this the moment its rail is up
 
 
 @dataclass
@@ -53,13 +54,16 @@ class Window:
     max_ua: float = 0.0
     raw: list = field(default_factory=list)
     finished_at: float = 0.0
+    arrive_until: float = float("inf")   # set by close(): when its last samples will be in
 
 
 class PowerMonitor:
     """Streams from a PPK2 and folds samples into whichever window is currently open."""
 
-    def __init__(self, ppk2, voltage_mv=DEFAULT_VOLTAGE_MV, raw_dir=None, log=print):
+    def __init__(self, ppk2, voltage_mv=DEFAULT_VOLTAGE_MV, raw_dir=None, log=print,
+                 latency_s=FALLBACK_LATENCY_S):
         self._ppk2 = ppk2
+        self.latency_s = latency_s
         self.voltage_mv = voltage_mv
         self._raw_dir = Path(raw_dir) if raw_dir else None
         self._log = log
@@ -94,18 +98,21 @@ class PowerMonitor:
             recover_streaming(port)
             ppk2 = PPK2_API(port)
             ppk2.get_modifiers()
+            latency_s = FALLBACK_LATENCY_S
             if mode == "source":
                 ppk2.use_source_meter()
                 ppk2.set_source_voltage(int(voltage_mv))
-                ppk2.toggle_DUT_power("ON")
+                ppk2.start_measuring()
+                latency_s = cls._measure_latency(ppk2)
             else:
                 ppk2.use_ampere_meter()
-            ppk2.start_measuring()
+                ppk2.start_measuring()
 
-            monitor = cls(ppk2, voltage_mv=voltage_mv, raw_dir=raw_dir, log=log)
+            monitor = cls(ppk2, voltage_mv, raw_dir, log, latency_s)
             monitor.start()
             log(f"power: PPK2 on {port}, {mode} mode"
-                + (f" at {voltage_mv} mV" if mode == "source" else ""))
+                + (f" at {voltage_mv} mV" if mode == "source" else "")
+                + f", stream latency {latency_s * 1000:.0f} ms")
             return monitor
         except Exception as exc:                       # noqa: BLE001 - see docstring
             holder = port_holder(port)
@@ -117,6 +124,25 @@ class PowerMonitor:
             else:
                 log(f"power: PPK2 setup failed ({exc}) — continuing without energy measurement")
             return None
+
+    @staticmethod
+    def _measure_latency(ppk2):
+        """Switch the board on and time how long the stream takes to show it."""
+        deadline = time.time() + 1.0
+        while time.time() < deadline:   # with the rail still off: let the stream run empty
+            ppk2.get_data()
+            time.sleep(POLL_INTERVAL_S)
+        switched_at = time.time()
+        ppk2.toggle_DUT_power("ON")
+        while time.time() - switched_at < 3.0:
+            data = ppk2.get_data()
+            if data:
+                result = ppk2.get_samples(data)
+                samples = result[0] if isinstance(result, tuple) else result
+                if samples and max(samples) > POWER_ON_UA:
+                    return time.time() - switched_at
+            time.sleep(POLL_INTERVAL_S)
+        return FALLBACK_LATENCY_S
 
     # -- lifecycle ------------------------------------------------------------------------
 
@@ -154,17 +180,19 @@ class PowerMonitor:
             self.total_samples += len(samples)
             if not self._windows:
                 return
-            # Negative readings are the PPK2's noise floor straddling zero; clamp rather than let
-            # them bias the sum downward.
+            # Negative readings are the PPK2's noise floor straddling zero: clamp them.
             cleaned = [s if s > 0 else 0.0 for s in samples]
             batch_sum = sum(cleaned)
             batch_min, batch_max = min(cleaned), max(cleaned)
+            now = time.time()   # these samples describe the current of latency_s ago
             for window in self._windows:
+                if not window.started_at + self.latency_s <= now < window.arrive_until:
+                    continue
                 window.samples += len(cleaned)
                 window.sum_ua += batch_sum
                 window.min_ua = min(window.min_ua, batch_min)
                 window.max_ua = max(window.max_ua, batch_max)
-                if window.keep_raw and (time.time() - window.started_at) < MAX_RAW_SECONDS:
+                if window.keep_raw and now - window.started_at - self.latency_s < MAX_RAW_SECONDS:
                     window.raw.extend(cleaned)
 
     # -- windows --------------------------------------------------------------------------
@@ -178,11 +206,15 @@ class PowerMonitor:
         return window
 
     def close(self, window):
-        """Close a window and return its energy summary, or None if nothing was captured."""
+        """Close a window and return its energy summary, or None if nothing was captured.
+
+        Blocks for the stream latency: the window's last samples are still on their way."""
+        window.finished_at = time.time()
+        window.arrive_until = window.finished_at + self.latency_s
+        time.sleep(self.latency_s + 0.02)
         with self._lock:
             if window in self._windows:
                 self._windows.remove(window)
-        window.finished_at = time.time()
 
         duration_s = window.finished_at - window.started_at
         if window.samples == 0 or duration_s <= 0:
@@ -210,8 +242,7 @@ class PowerMonitor:
     def _write_raw(self, window):
         self._raw_dir.mkdir(parents=True, exist_ok=True)
         path = self._raw_dir / (window.label.replace("/", "_") + ".csv")
-        # Sample index rather than a timestamp per row: the PPK2's rate is fixed, so the index and
-        # the recorded duration reconstruct the time axis exactly and at a fraction of the size.
+        # Sample index, not a timestamp per row: index and duration reconstruct the time axis.
         with path.open("w") as handle:
             handle.write(f"# window={window.label}\n")
             handle.write(f"# duration_s={window.finished_at - window.started_at:.4f} "

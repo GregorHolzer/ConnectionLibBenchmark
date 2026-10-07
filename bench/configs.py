@@ -36,8 +36,10 @@ LORA_FACTORS = {
 ESPNOW_BASELINE = {"channel": 1, "payload": 32}
 ZIGBEE_BASELINE = {"payload": 32}
 
-# LoRa gets fewer exchanges than the 2.4 GHz radios: its airtime is what the duty cycle rations.
-EXCHANGES = {"lora": 20, "espnow": 100, "zigbee": 100}
+# Sized so that every run lasts seconds: the PPK2 window is only aligned to a few tens of
+# milliseconds, and 100 ESP-NOW payloads were over in 0.17 s, too short to meter. LoRa gets the
+# fewest because its airtime is what the duty cycle rations.
+EXCHANGES = {"lora": 20, "espnow": 1500, "zigbee": 100}
 
 
 @dataclass(frozen=True)
