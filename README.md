@@ -79,7 +79,8 @@ node and gateway on the raw vendor APIs. It is driven from here with `--firmware
 
 - [docs/field-campaign.md](docs/field-campaign.md) — running a campaign, the LoRa handshake, duty
   cycle, and the limits of what a distance campaign shows.
-- [docs/metrics.md](docs/metrics.md) — what is measured, how, and what cannot be.
+- [docs/scripts.md](docs/scripts.md) — every script and every flag.
+- [docs/metrics.md](docs/metrics.md) — every recorded field and derived metric, and what is not recorded.
 - [docs/regulations.md](docs/regulations.md) — the EU radio envelope the configurations stay in.
 - [docs/findings.md](docs/findings.md) — the September 2026 bench campaigns (previous harness) and
   the open hardware problems, which still apply.
