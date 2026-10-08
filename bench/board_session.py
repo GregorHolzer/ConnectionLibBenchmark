@@ -82,42 +82,6 @@ def capture(ser, seconds):
     return lines
 
 
-def send(ser, command, terminators, timeout_s=3.0):
-    """Send one line, read until a terminator appears. Returns (matched_line, all_lines)."""
-    ser.reset_input_buffer()
-    ser.write((command + "\n").encode())
-    ser.flush()
-    deadline = time.time() + timeout_s
-    seen = []
-    while time.time() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        line = raw.decode(errors="replace").strip()
-        if not line:
-            continue
-        seen.append(line)
-        for term in terminators:
-            if term in line:
-                return line, seen
-    return None, seen
-
-
-def identify(ser):
-    """Ask the board what it is. No answer is a result, not an error."""
-    log("\n3. Firmware")
-    pong, seen = send(ser, "PING", ("PONG,", "ERR,"))
-    if not pong:
-        log(f"  {DIM}no reply to PING — not the benchmark firmware"
-            f"{' (board is saying nothing at all)' if not seen else ''}{RESET}")
-        return None
-    log(f"  {GREEN}PONG{RESET}  {pong}")
-    info, _ = send(ser, "INFO", ("INFO,", "ERR,"))
-    if info:
-        log(f"  {GREEN}INFO{RESET}  {info}")
-    return pong
-
-
 def report_current(power, seconds, label):
     """Mean/min/max over a window. Near-zero means the rail is not reaching the board."""
     window = power.open(label)

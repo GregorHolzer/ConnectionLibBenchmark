@@ -82,10 +82,3 @@ def read_mac(port, pio="pio"):
         raise FirmwareError(f"esptool reported no MAC for {port}:\n{result.stdout[-400:]}")
     return macs[-1]
 
-
-def find_board_ports():
-    """Stable /dev/serial/by-id paths of every serial device that is not the PPK2."""
-    by_id = Path("/dev/serial/by-id")
-    if not by_id.is_dir():
-        return []
-    return sorted(str(p) for p in by_id.iterdir() if "Nordic" not in p.name and "PPK2" not in p.name)

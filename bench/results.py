@@ -70,7 +70,3 @@ def load_exchanges(results_dir):
     with path.open(newline="") as handle:
         return list(csv.DictReader(handle))
 
-
-def load_meta(results_dir):
-    path = Path(results_dir) / "meta.json"
-    return json.loads(path.read_text()) if path.exists() else {}

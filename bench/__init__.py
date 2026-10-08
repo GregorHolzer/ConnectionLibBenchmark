@@ -2,5 +2,3 @@
 
 bench.py is the command line; README.md says which module does what.
 """
-
-__version__ = "0.2.0"
