@@ -57,8 +57,7 @@ class Runner:
         if uses_gateway:
             self._wait_for_gateway_home()
             duty_wait_s = self.budget.wait_for(
-                airtime.point_airtime_s(ping_ms, control_ms, config.exchanges,
-                                        header_bytes=self.lora_header_bytes), log=self.log)
+                airtime.point_airtime_s(ping_ms, control_ms, config.exchanges), log=self.log)
 
         self._run_id = (self._run_id + 1) % 256
         header = firmware.render_header(config, self.boards["gateway_mac"],
@@ -96,8 +95,7 @@ class Runner:
         if uses_gateway:
             pings = run["summary"]["sent"] if run["summary"] else len(run["exchanges"])
             attempts = run["home"]["attempts"] if clean else airtime.CONTROL_ATTEMPTS
-            charged = airtime.point_airtime_s(ping_ms, control_ms, pings, attempts, clean,
-                                              self.lora_header_bytes)
+            charged = airtime.point_airtime_s(ping_ms, control_ms, pings, attempts, clean)
             self.budget.record(charged)
             if not released:
                 self._gateway_home_at = time.time() + configs.lease_seconds(config) + 5

@@ -32,7 +32,7 @@ def describe(values):
         return {}
     ordered = sorted(values)
     p25, p75 = percentile(ordered, 25), percentile(ordered, 75)
-    out = {
+    return {
         "n": len(ordered),
         "median": statistics.median(ordered),
         "min": ordered[0],
@@ -44,31 +44,6 @@ def describe(values):
         "p99": percentile(ordered, 99),
         "mean": statistics.fmean(ordered),   # reported alongside, never instead
     }
-    out["stdev"] = statistics.stdev(ordered) if len(ordered) > 1 else 0.0
-    out["cv"] = (out["stdev"] / out["mean"]) if out["mean"] else 0.0
-    # Robust dispersion: IQR over median. Preferred over `cv` for judging noise, because these
-    # latency distributions are strongly quantised - an ESP-NOW point can sit at exactly 2.42 ms
-    # for three quarters of its exchanges (IQR = 0) while a handful of slow ones drag the standard
-    # deviation up to a CV of 0.31. The classical CV then reports "noisy" about a measurement that
-    # is in fact repeating the same value. Same reasoning as the deck's preference for medians.
-    out["robust_cv"] = (out["iqr"] / out["median"]) if out["median"] else 0.0
-    return out
-
-
-def triscale_runs_needed(percentile_pct, confidence):
-    """TriScale Eq. 4: N >= log(1-C)/log(1-p), the samples a percentile claim needs.
-
-    `p` is the distance from the *nearer tail*, not the percentile itself - the estimate is an
-    order statistic counted inward from whichever end is closer, so the 95th percentile costs
-    exactly what the 5th does. Feeding the percentile in directly makes a 95th-percentile claim
-    look like it needs a single sample, which is nonsense.
-
-    Reproduces the paper's table: 50th at 95 % -> 5, 25th at 95 % -> 11, 5th and 95th -> 59.
-    """
-    if not 0 < percentile_pct < 100 or not 0 < confidence < 1:
-        return None
-    p = min(percentile_pct, 100 - percentile_pct) / 100.0
-    return math.ceil(math.log(1 - confidence) / math.log(1 - p))
 
 
 def median_confidence_interval(values, confidence=0.95):

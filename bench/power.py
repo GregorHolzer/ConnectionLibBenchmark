@@ -71,11 +71,9 @@ class PowerMonitor:
         self._windows = []
         self._stop = threading.Event()
         self._thread = None
-        self.total_samples = 0
 
     @classmethod
-    def create(cls, port=None, voltage_mv=DEFAULT_VOLTAGE_MV, mode="source", raw_dir=None,
-               log=print):
+    def create(cls, port=None, voltage_mv=DEFAULT_VOLTAGE_MV, raw_dir=None, log=print):
         """Return a started monitor, or None if no PPK2 is usable.
 
         Never raises: a campaign must still run when the PPK2 is absent, unplugged mid-run, or the
@@ -96,21 +94,15 @@ class PowerMonitor:
             recover_streaming(port)
             ppk2 = PPK2_API(port)
             ppk2.get_modifiers()
-            latency_s = FALLBACK_LATENCY_S
-            if mode == "source":
-                ppk2.use_source_meter()
-                ppk2.set_source_voltage(int(voltage_mv))
-                ppk2.start_measuring()
-                latency_s = cls._measure_latency(ppk2)
-            else:
-                ppk2.use_ampere_meter()
-                ppk2.start_measuring()
+            ppk2.use_source_meter()
+            ppk2.set_source_voltage(int(voltage_mv))
+            ppk2.start_measuring()
+            latency_s = cls._measure_latency(ppk2)
 
             monitor = cls(ppk2, voltage_mv, raw_dir, log, latency_s)
             monitor.start()
-            log(f"power: PPK2 on {port}, {mode} mode"
-                + (f" at {voltage_mv} mV" if mode == "source" else "")
-                + f", stream latency {latency_s * 1000:.0f} ms")
+            log(f"power: PPK2 on {port}, source mode at {voltage_mv} mV, "
+                f"stream latency {latency_s * 1000:.0f} ms")
             return monitor
         except Exception as exc:                       # noqa: BLE001 - see docstring
             holder = port_holder(port)
@@ -173,7 +165,6 @@ class PowerMonitor:
 
     def _accumulate(self, samples):
         with self._lock:
-            self.total_samples += len(samples)
             if not self._windows:
                 return
             # Negative readings are the PPK2's noise floor straddling zero: clamp them.

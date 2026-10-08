@@ -44,8 +44,7 @@ def time_on_air_ms(payload_bytes, sf=9, bw_khz=125.0, coding_rate=7, preamble=8,
     return (preamble + 4.25 + payload_symbols) * t_sym * 1000.0
 
 
-def point_airtime_s(ping_ms, control_ms, pings, switch_attempts=CONTROL_ATTEMPTS, clean=False,
-                    header_bytes=LORA_HEADER_BYTES):
+def point_airtime_s(ping_ms, control_ms, pings, switch_attempts=CONTROL_ATTEMPTS, clean=False):
     """LoRa airtime one run costs the node, whatever its technology.
 
     Every run announces itself with a config frame on LoRa home, so ESP-NOW and Zigbee runs cost
@@ -56,7 +55,7 @@ def point_airtime_s(ping_ms, control_ms, pings, switch_attempts=CONTROL_ATTEMPTS
     one that did not end cleanly; over-charging is the safe side. A clean run is charged what it
     sent: `switch_attempts` config frames and one end message.
     """
-    del header_bytes   # home always goes through the library, with its header
+    # Home always goes through the library, so with the library's header whatever the stack.
     switch_ms = time_on_air_ms(SWITCH_FRAME_BYTES, **HOME)
     control_frames = 1 if clean else 2 * CONTROL_ATTEMPTS
     return (pings * ping_ms + switch_attempts * switch_ms + control_frames * control_ms) / 1000.0

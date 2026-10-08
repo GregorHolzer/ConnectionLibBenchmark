@@ -75,7 +75,7 @@ what `bench.py status` and `plot.py` show.
 |---|---|---|
 | Delivery (`pdr`) | fraction | acknowledged ÷ sent. What an application using the library sees. |
 | Delivery at the gateway (`gateway_pdr`) | fraction | gateway's count ÷ sent, over runs whose report came back. Can exceed `pdr`: a payload can arrive while its ack is lost. |
-| Delivery latency (`latency_us`) | µs | distribution of `latency_us` over acknowledged payloads: median, min, max, quartiles, IQR, 95th and 99th percentile, mean, standard deviation |
+| Delivery latency (`latency_us`) | µs | distribution of `latency_us` over acknowledged payloads: median, min, max, quartiles, IQR, 95th and 99th percentile, mean |
 | Median confidence interval (`latency_median_ci_us`) | µs | non-parametric 95 % interval for the median; absent below 6 samples |
 | Goodput (`goodput_bps`) | bit/s | acknowledged payload bits ÷ `elapsed_ms`. One way, of a back-to-back burst. |
 | Framing efficiency (`framing_efficiency`) | fraction | payload bytes ÷ `total_bytes`. Library framing only. |

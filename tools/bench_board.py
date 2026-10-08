@@ -36,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bench.board_session import (BOARD_BAUD, DIM, GREEN, RED, RESET, capture, describe_board,
-                                  identify, log, power_off, report_current, wait_for_board)
+                                  log, power_off, report_current, wait_for_board)
 from bench.power import DEFAULT_VOLTAGE_MV, PowerMonitor
 from bench.ppk2_port import find_port, port_holder, recover_streaming
 
@@ -82,7 +82,7 @@ def main():
     drained = recover_streaming(ppk2_port)
     if drained:
         log(f"  {DIM}drained {drained} bytes of leftover stream from a previous run{RESET}")
-    power = PowerMonitor.create(port=ppk2_port, voltage_mv=args.voltage, mode="source", log=log)
+    power = PowerMonitor.create(port=ppk2_port, voltage_mv=args.voltage, log=log)
     if power is None:
         return 1
 
@@ -124,7 +124,6 @@ def main():
                 lines = capture(ser, args.seconds)
                 if not lines:
                     log(f"  {RED}silence{RESET} — powered and enumerated, but nothing on the UART")
-                identify(ser)
 
         log("\n4. Current")
         report_current(power, 3.0, "hold")
