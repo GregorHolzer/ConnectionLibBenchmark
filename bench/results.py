@@ -1,135 +1,73 @@
-"""Streaming results writer.
+"""What a campaign leaves on disk, written as it happens.
 
-Rows are appended and flushed after every configuration point rather than held in memory and
-written at the end: a ten-hour campaign that loses everything to a USB hiccup in hour nine is not
-an acceptable failure mode, and `--resume` needs the partial file to pick up from.
+    results/<campaign>/
+        meta.json        boards, firmware stack, when it started
+        runs.jsonl       one line per flashed configuration: where, what, delivery, energy
+        exchanges.csv    one row per ping, for any statistic nobody thought of in advance
+        serial.log       every record line the node printed, verbatim
+        raw/             PPK2 waveforms of the baseline points
+
+A campaign is one directory for all distances. Every run is appended and flushed at once, so an
+interrupted day loses at most the run in progress, and `completed()` is what lets it resume.
 """
 
 import csv
 import json
-import time
 from pathlib import Path
 
-from .records import NODE_COLUMNS, RAW_COLUMNS, STATUS_NAMES
+from .records import EXCHANGE_FIELDS
+
+RUN_KEY_FIELDS = ["distance_m", "round", "key"]
+CSV_FIELDS = RUN_KEY_FIELDS + EXCHANGE_FIELDS + ["status_name"]
 
 
 class ResultWriter:
     def __init__(self, out_dir):
-        self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.raw_path = self.out_dir / "raw.csv"
-        self.node_path = self.out_dir / "node_rx.csv"
-        self.points_path = self.out_dir / "points.jsonl"
+        self.dir = Path(out_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._runs = self.dir / "runs.jsonl"
+        self._csv = self.dir / "exchanges.csv"
+        self._serial = self.dir / "serial.log"
+        if not self._csv.exists():
+            with self._csv.open("w", newline="") as handle:
+                csv.writer(handle).writerow(CSV_FIELDS)
 
-        fresh = not self.raw_path.exists()
-        self._raw_file = self.raw_path.open("a", newline="")
-        self._node_file = self.node_path.open("a", newline="")
-        self._points_file = self.points_path.open("a")
-        self._raw = csv.writer(self._raw_file)
-        self._node = csv.writer(self._node_file)
-        if fresh:
-            self._raw.writerow(RAW_COLUMNS)
-            self._node.writerow(NODE_COLUMNS)
+    def write_meta(self, meta):
+        """Record the campaign's fixed facts once; a later site of the same campaign keeps them."""
+        path = self.dir / "meta.json"
+        if not path.exists():
+            path.write_text(json.dumps(meta, indent=2) + "\n")
 
-    def close(self):
-        for handle in (self._raw_file, self._node_file, self._points_file):
-            handle.close()
+    def write_run(self, record, exchanges, lines):
+        where = {name: record[name] for name in RUN_KEY_FIELDS}
+        with self._csv.open("a", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+            for exchange in exchanges:
+                writer.writerow({**where, **exchange})
+        with self._serial.open("a") as handle:
+            handle.write(f"# {json.dumps(where)} at {record['started_at']}\n")
+            handle.write("\n".join(lines) + "\n")
+        with self._runs.open("a") as handle:   # last: a run counts as recorded once this is in
+            handle.write(json.dumps(record) + "\n")
 
-    def completed_indices(self):
-        """Run indices already present, so --resume can skip them."""
-        if not self.points_path.exists():
-            return set()
-        done = set()
-        with self.points_path.open() as handle:
-            for line in handle:
-                try:
-                    done.add(json.loads(line)["run_index"])
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        return done
-
-    def write_point(self, run, header, exchanges, summary, node_rx, node_summary, started_at,
-                    energy=None, extra=None):
-        point = run.point
-        prefix = [run.index, run.rotation, point.tech, point.factor, point.level, point.key]
-
-        for exchange in exchanges:
-            self._raw.writerow(prefix + [
-                round(started_at, 3), exchange["seq"], exchange["attempt"],
-                exchange["payload_bytes"], exchange["total_bytes"],
-                exchange["send_us"], exchange["rtt_us"], exchange["status"],
-                STATUS_NAMES.get(exchange["status"], exchange["status"]), exchange["acked"],
-                "" if exchange["rssi_dbm"] is None else exchange["rssi_dbm"],
-                "" if exchange["snr_db"] is None else exchange["snr_db"],
-                exchange["duty_pct"], exchange["ok"],
-            ])
-
-        for arrival in node_rx:
-            self._node.writerow(prefix + [
-                arrival["seq"], arrival["payload_bytes"], arrival["total_bytes"],
-                "" if arrival["rssi_dbm"] is None else arrival["rssi_dbm"],
-                "" if arrival["snr_db"] is None else arrival["snr_db"],
-            ])
-
-        # One JSON line per configuration point: the inputs recorded with the outputs, which is
-        # what practice P14 (benchmark coverage) needs to be checkable after the fact.
-        record = {
-            "run_index": run.index,
-            "rotation": run.rotation,
-            "tech": point.tech,
-            "factor": point.factor,
-            "level": point.level,
-            "point_key": point.key,
-            "params": point.params,
-            "started_at": started_at,
-            "finished_at": time.time(),
-            "header": header,
-            "summary": summary,
-            "node_summary": node_summary,
-            "energy": energy,
-            "exchange_count": len(exchanges),
-            "node_rx_count": len(node_rx),
-        }
-        # Mode-specific facts, e.g. the field runner's lease outcome.
-        record.update(extra or {})
-        self._points_file.write(json.dumps(record) + "\n")
-
-        self._raw_file.flush()
-        self._node_file.flush()
-        self._points_file.flush()
+    def completed(self):
+        """(distance_m, round, key) of every run that reached END without an error."""
+        return {(r["distance_m"], r["round"], r["key"]) for r in load_runs(self.dir)
+                if r["complete"] and not r["error"]}
 
 
-def write_meta(out_dir, meta):
-    Path(out_dir, "meta.json").write_text(json.dumps(meta, indent=2))
-
-
-def load_points(results_dir):
-    path = Path(results_dir) / "points.jsonl"
+def load_runs(results_dir):
+    path = Path(results_dir) / "runs.jsonl"
     if not path.exists():
         return []
-    out = []
-    with path.open() as handle:
-        for line in handle:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return out
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def load_raw(results_dir):
-    path = Path(results_dir) / "raw.csv"
+def load_exchanges(results_dir):
+    path = Path(results_dir) / "exchanges.csv"
     if not path.exists():
         return []
-    with path.open() as handle:
-        return list(csv.DictReader(handle))
-
-
-def load_node_rx(results_dir):
-    path = Path(results_dir) / "node_rx.csv"
-    if not path.exists():
-        return []
-    with path.open() as handle:
+    with path.open(newline="") as handle:
         return list(csv.DictReader(handle))
 
 

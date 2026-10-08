@@ -1,98 +1,85 @@
-"""Parsing the firmware's PP* records, and the raw CSV schema they land in.
+"""Parsing the node's serial records (src/node.cpp) into one result per run.
 
-Parsing is defensive by design. The Zigbee path interleaves raw XBee API frame bytes into the
-serial stream, so a line may contain binary before the record starts and may be truncated after
-it; a malformed record is skipped rather than aborting a ten-hour campaign.
+Parsing is defensive: a malformed line is skipped rather than aborting a day in the field.
 """
 
+# connectionlib::SendStatus
 STATUS_NAMES = {0: "Ok", 1: "Timeout", 2: "DutyCycleExceeded", 3: "PayloadTooLarge",
-                4: "NotReady", 5: "Failed"}
+                4: "NotReady", 5: "Failed", 6: "Queued"}
 
-# One row per gateway send attempt, successes and failures alike.
-#
-# `rssi_dbm` / `snr_db` describe the **reply this board received**, not the send. Signal quality is
-# a receive-side quantity and no backend populates SendResult's copies of it, which is why these
-# columns were empty in every campaign recorded before that was fixed - the firmware was printing
-# fields nothing ever wrote. LoRa fills both from the chip at no cost; ESP-NOW fills rssi only when
-# `rssi=1` puts a promiscuous sniffer alongside, and Zigbee only when `rssi=1` buys a `DB` AT query.
-RAW_COLUMNS = [
-    "run_index", "rotation", "tech", "factor", "level", "point_key",
-    "started_at", "seq", "attempt", "payload_bytes", "total_bytes",
-    "send_us", "rtt_us", "status", "status_name", "acked", "rssi_dbm", "snr_db",
-    "duty_pct", "ok",
-]
-
-# One row per arrival observed at the receiver - the only place PDR can honestly be counted.
-NODE_COLUMNS = [
-    "run_index", "rotation", "tech", "factor", "level", "point_key",
-    "seq", "payload_bytes", "total_bytes", "rssi_dbm", "snr_db",
-]
+# One row per payload. `latency_us` is the time spent in send(): from handing the payload to the
+# library until the library had its ack, or gave up. `acked` is that ack.
+EXCHANGE_FIELDS = ["seq", "payload_bytes", "total_bytes", "latency_us", "status", "acked",
+                   "duty_pct"]
+_FLOAT_FIELDS = {"duty_pct"}
+SUMMARY_FIELDS = ["sent", "acked", "elapsed_ms", "duty_pct", "aborted"]
 
 
-def _optional_float(text):
-    return float(text) if text else None
+def _number(name, text):
+    if text == "":
+        return None
+    return float(text) if name in _FLOAT_FIELDS else int(text)
 
 
-def parse_records(records):
-    """Split a list of raw record strings into header / exchanges / summary / node data."""
-    header, exchanges, summary, node_rx, node_summary = {}, [], None, [], None
+def _fields(names, values):
+    if len(values) != len(names):
+        raise ValueError("wrong field count")
+    return {name: _number(name, value) for name, value in zip(names, values)}
 
-    for record in records:
-        fields = record.split(",")
-        kind = fields[0]
+
+def parse(lines):
+    """Split the lines of one run into header, handshake, idle, payloads, summary and report."""
+    run = {"header": {}, "home": None, "idle_ms": None, "exchanges": [], "summary": None,
+           "report": None, "error": None, "complete": False}
+    for line in lines:
+        kind, _, rest = line.partition(",")
+        parts = rest.split(",") if rest else []
         try:
-            if kind == "PPH" and len(fields) >= 3:
-                header[fields[1]] = ",".join(fields[2:]).strip()
-            elif kind == "PPD" and len(fields) >= 13:
-                exchanges.append({
-                    "seq": int(fields[1]),
-                    "attempt": int(fields[2]),
-                    "payload_bytes": int(fields[3]),
-                    "total_bytes": int(fields[4]),
-                    "send_us": int(fields[5]),
-                    "rtt_us": int(fields[6]),
-                    "status": int(fields[7]),
-                    "acked": int(fields[8]),
-                    "rssi_dbm": _optional_float(fields[9]),
-                    "snr_db": _optional_float(fields[10]),
-                    "duty_pct": float(fields[11]),
-                    "ok": int(fields[12]),
-                })
-            elif kind == "PPS" and len(fields) >= 8:
-                summary = {
-                    "successes": int(fields[1]),
-                    "attempts": int(fields[2]),
-                    "retries": int(fields[3]),
-                    "elapsed_ms": int(fields[4]),
-                    "duty_pct": float(fields[5]),
-                    "send_us_total": int(fields[6]),
-                    "duty_blocked": int(fields[7]),
-                }
-            elif kind == "PPN" and len(fields) >= 6:
-                node_rx.append({
-                    "seq": int(fields[1]),
-                    "payload_bytes": int(fields[2]),
-                    "total_bytes": int(fields[3]),
-                    "rssi_dbm": _optional_float(fields[4]),
-                    "snr_db": _optional_float(fields[5]),
-                })
-            elif kind == "PPI" and len(fields) >= 4:
-                summary = {
-                    "idle": True,
-                    "tech": fields[1],
-                    "elapsed_ms": int(fields[2]),
-                    "polls": int(fields[3]),
-                    "successes": 0, "attempts": 0, "retries": 0,
-                    "duty_pct": 0.0, "send_us_total": 0, "duty_blocked": 0,
-                }
-            elif kind == "PPM" and len(fields) >= 5:
-                node_summary = {
-                    "rx_distinct": int(fields[1]),
-                    "rx_total": int(fields[2]),
-                    "replies_ok": int(fields[3]),
-                    "reply_failures": int(fields[4]),
-                }
+            if kind == "PPH" and len(parts) >= 2:
+                run["header"][parts[0]] = ",".join(parts[1:])
+            elif kind == "HOME":
+                run["home"] = {"acked": parts[0] == "ok",
+                               "attempts": int(parts[1]) if parts[0] == "ok" else None}
+            elif kind == "IDLE" and parts[0] == "end":
+                run["idle_ms"] = int(parts[1])
+            elif kind == "PPD":
+                exchange = _fields(EXCHANGE_FIELDS, parts)
+                exchange["status_name"] = STATUS_NAMES.get(exchange["status"], "?")
+                run["exchanges"].append(exchange)
+            elif kind == "PPS":
+                run["summary"] = _fields(SUMMARY_FIELDS, parts)
+            elif kind == "REPORT":
+                # "requested": the gateway acked the request, so on LoRa it has gone home.
+                run["report"] = {"requested": parts[0] in ("ok", "lost"), "received": None,
+                                 "rssi_dbm": None, "snr_db": None}
+                if parts[0] == "ok":
+                    run["report"].update(received=int(parts[1]),
+                                         rssi_dbm=float(parts[2]) if parts[2] else None,
+                                         snr_db=float(parts[3]) if parts[3] else None)
+            elif kind == "ERR":
+                run["error"] = rest
+            elif kind == "END":
+                run["complete"] = True
         except (ValueError, IndexError):
-            continue   # corrupted by interleaved binary; drop this record only
+            continue
+    return run
 
-    return header, exchanges, summary, node_rx, node_summary
+
+def delivery(run):
+    """Delivery of one run, as the library confirmed it and as the gateway counted it.
+
+    `pdr` is acked payloads over sent: what an application using the library would see.
+    `gateway_received` is the gateway's own count, from its report; it can exceed `acked`,
+    because a payload can arrive while its ack is lost. None when no report came back.
+    """
+    summary, report = run["summary"], run["report"] or {}
+    if not summary or not summary["sent"]:
+        return {"sent": 0, "acked": 0, "pdr": None, "gateway_received": None, "gateway_pdr": None}
+    received = report.get("received")
+    return {
+        "sent": summary["sent"],
+        "acked": summary["acked"],
+        "pdr": summary["acked"] / summary["sent"],
+        "gateway_received": received,
+        "gateway_pdr": None if received is None else min(received / summary["sent"], 1.0),
+    }

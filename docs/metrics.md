@@ -1,184 +1,151 @@
-# Metrics
+# Recorded metrics
 
-What this benchmark measures, how, and — equally important — what it cannot.
+What the benchmark writes down, field by field, and what is computed from it. How to run it is in
+[scripts.md](scripts.md); the design behind it is in [field-campaign.md](field-campaign.md).
 
-Categorised per [benchmarking-practices.md](benchmarking-practices.md) §1. For a transport library
-the "general" metrics are timing ones; the domain-specific metrics are the wireless-sensor-network
-ones; low-level PHY counters are largely unavailable, which is itself a finding.
+## What one run is
 
-## Measured
+The node sends payloads to the gateway one way, back to back. The measured loop is the library's
+`send()` and nothing else (`src/node.cpp`):
 
-| Metric | Category | Axis | Definition |
-|---|---|---|---|
-| `rtt_us` | general | latency | Application send instant → application receive instant, for one request/response exchange. |
-| `send_us` | general | latency | Time blocked inside `Transport::send()`: the outbound transmission plus any backend status wait. |
-| Goodput | domain | throughput | Delivered payload bits ÷ wall-clock seconds, over a whole configuration point. |
-| PDR (uplink, downlink) | domain | — | Distinct sequence numbers received **at the receiver** ÷ sent. Counted per direction. In the field, where the gateway has no host, see [field-campaign.md](field-campaign.md). |
-| Retries / first-attempt success | domain | — | Exchanges completed without retransmission. |
-| Ack rate | domain | — | Fraction of sends the backend reported acknowledged. |
-| Payload efficiency | domain | — | `payloadBytes / totalBytes` — *library* framing only, see below. |
-| Duty cycle | domain | — | Airtime consumed against the rolling-window budget. |
-| RSSI / SNR | low-level | — | LoRa both, at no cost. ESP-NOW RSSI and Zigbee RSSI only under `--rssi`; neither exposes SNR at all. See below. |
-| **Energy per delivered payload** | domain | — | Measured with a Nordic PPK2 source-metering the **node**'s battery rail at 3.9 V. See below. |
-| **Standing current** | domain | — | Mean current with the radio configured but idle — very likely the figure that decides battery life. |
+- `send()` returns when the library has its confirmation of delivery, or has given up waiting:
+  ESP-NOW's MAC ack, Zigbee's APS ack, ConnectionLib's software ack on LoRa.
+- Each payload is sent once. The benchmark adds no retries and no acknowledgement of its own.
+- A run stops after 10 unacknowledged payloads in a row.
+- Results are kept in RAM and printed after the run, so the serial port is in neither the timings
+  nor the energy.
 
-### Why `rtt_us` and `send_us` are separate
+The PPK2 meters the node for the whole run.
 
-Reporting only one of these produced two wrong published numbers in an earlier harness, both of
-which looked plausible:
+## Files
 
-- The timer started **after** `send()` returned, so the outbound transmission was excluded. LoRa
-  was reported at 212 ms when the true round trip is 409 ms — the 212 ms was the reply leg alone,
-  which matched the computed single-leg time-on-air almost exactly.
-- On Zigbee the effect was total: a broadcast blocks ~1 s inside `send()` waiting for its APS
-  status, the reply lands inside that window and is buffered, and the measured round trip was
-  **0 ms**.
+Everything of a campaign is in `results/<campaign>/`.
 
-Splitting the two makes the cost structure visible instead of hiding it in a single number.
-
-### Latency vs. throughput (practice P1)
-
-Goodput is measured over the whole configuration point and is **not** derived from `rtt_us`. The
-exchange is a strict request/response with at most one packet in flight, so latency and throughput
-happen to be closely coupled here — but deriving one from the other would bake that assumption
-into the data, and it stops holding the moment any pipelining is introduced.
-
-### Energy
-
-Measured with a **Nordic PPK2 source-metering the node board's 5 V header pin at 5.0 V** (left
-header pin 10, return on pin 9). The 18650 is removed — a cell in the holder buffers every current
-spike, so you would measure the charger instead — and the node's USB carries data only, with the
-cable's VBUS conductor cut: otherwise the host supplies the same net the PPK2 is sourcing and the
-measurement is meaningless.
-
-This tap is upstream of the AXP2101, so it includes the PMU's 5→3.3 V conversion loss and the
-onboard USB-serial bridge in every reading, floor and per-radio alike. **The deltas between
-technologies are therefore the trustworthy quantity; the absolute currents are inflated by a
-constant.** A battery-terminal tap at a mid-discharge 3.9 V would model a deployed satellite's
-rail more directly and exclude that overhead. Whether it is usable here is untested: it depends on
-whether the CH9102F bridge draws from the board's 3.3 V rail or from USB VBUS, and if the latter,
-a battery tap with VBUS cut leaves no serial link for the campaign to be driven over.
-
-The board is **stripped for these measurements**: the GPS rail (ALDO3) is disabled in firmware and
-the OLED is not compiled in. Neither is used by the benchmark, so both were purely constant loads —
-harmless for latency, but for energy they sit under every measurement and compress exactly the
-per-technology differences the comparison exists to resolve.
-
-Three quantities, and the difference between them matters:
-
-| | What it answers |
-|---|---|
-| **Board floor** (`tech=none`, idle) | what the ESP32 costs with every radio down |
-| **Standing current** (radio configured, idle) | what this radio costs while merely *able* to receive |
-| **Energy per delivered payload** (active) | what moving a message costs |
-
-Reported both absolute and **above idle**, because they lead to different decisions. For a node
-that must last months, standing current very likely dominates: it applies continuously while
-per-packet energy applies only during the small fraction of time the node transmits. A radio can
-therefore lose the energy comparison outright on idle current regardless of how efficient its
-packets are — and ESP-NOW cannot receive at all without WiFi up, where LoRa sits in continuous
-receive at an order of magnitude less.
-
-**The caveat that bounds all of it:** this harness never sleeps. What is measured is energy during
-*active operation*, which is the right basis for comparing the three technologies against each
-other. Absolute battery life needs a duty-cycled sleep model layered on top, since a real satellite
-spends almost all its time asleep and this benchmark spends none of it.
-
-### Signal quality, and why capturing it is opt-in
-
-`--rssi` on either runner turns on per-packet signal quality. It is off by default, and the default
-is the point: the three radios charge very different prices for the same number.
-
-| | RSSI | SNR | Cost of capturing it |
-|---|---|---|---|
-| LoRa | ✅ always | ✅ always | none — RadioLib reads both out of the chip for a packet that already arrived |
-| ESP-NOW | ✅ under `--rssi` | ❌ none exists | a promiscuous-mode sniffer running alongside, which hands every data frame on the channel to the CPU |
-| Zigbee | ✅ under `--rssi` | ❌ none exists | a `DB` AT query per receive: a UART round trip at 9600 baud, inside the window `poll()` is timed over |
-
-The ESP-NOW and Zigbee routes both perturb exactly the energy and latency figures this bench
-exists to produce, so a campaign run with `--rssi` measures a different system from one run
-without. `meta.json` records `rssi_capture` for every campaign, which is what stops the two being
-pooled by accident.
-
-The ESP-NOW sniffer is needed because this Arduino core is on IDF 4.4, whose ESP-NOW receive
-callback takes the legacy three arguments and carries no `rx_ctrl`; the native
-`esp_now_recv_info_t->rx_ctrl->rssi` arrived in IDF 5.x.
-
-**In `raw.csv`, `rssi_dbm` and `snr_db` describe the reply this board received**, not the send.
-Signal quality is a receive-side quantity and no backend populates `SendResult`'s copies of it,
-which is why those columns were empty in every campaign recorded before this was fixed — the
-firmware was printing fields that nothing ever wrote.
-
-None of this promotes RSSI or SNR to a comparison axis. They stay observed metrics, for the
-reasons in ConnectionLib's `docs/measurement-methodology.md` §4.
-
-The field campaign keeps the pong a plain echo instead of carrying the gateway's readings back;
-[field-campaign.md](field-campaign.md) says why.
-
-## The no-library baseline
-
-`stack=raw` runs the same exchange straight onto the vendor API — RadioLib's `SX1278`,
-`esp_now.h`, xbee-arduino's `ZBTxRequest` — with ConnectionLib out of the path. The exposé asks
-for results that keep what the library contributes separable from what the radios contribute, and
-this is the other half of that subtraction.
-
-The raw transports implement the same `Transport` interface, so `runGatewayPoint` measures both
-arms with the same code, the same timing points and the same records; only `send()` and `poll()`
-differ. Each technology sweeps the raw arm across the common payload range, because the library's
-cost is not constant in relative terms. Time-on-air is quantised into symbols, so the header
-costs a near-fixed **+28.7 ms per transmission** at the SF9/BW125/CR4:7 baseline — 14.5 % of an
-8-byte exchange, 4.2 % of an 84-byte one. (Its share of *bytes on air* is the larger 43 % at
-8 bytes; the two are different quantities and only the airtime one drives energy.)
-
-| | bypassed | kept |
+| File | One entry per | Content |
 |---|---|---|
-| LoRa | the 6-byte `FrameHeader`, `Address` translation | duty-cycle enforcement |
-| ESP-NOW | `Address` translation, the receive ring buffer | — |
-| Zigbee | `Address` translation, the send-window RX buffering | — |
+| `meta.json` | campaign | boards, firmware stack, start time, whether the duty cycle was enforced between runs |
+| `sites.jsonl` | `site` invocation | distance, free-text note, time |
+| `runs.jsonl` | flashed configuration | the run record, [below](#per-run-runsjsonl) |
+| `exchanges.csv` | payload | the per-payload record, [below](#per-payload-exchangescsv) |
+| `serial.log` | run | every record line the node printed, verbatim |
+| `raw/<config>-<distance>m-r<round>.csv` | baseline run | the first 8 s of the current waveform, one sample per row |
 
-**Duty-cycle enforcement stays in the raw LoRa arm.** It is a regulatory control rather than a
-library feature under test, and docs/regulations.md is explicit that the EU envelope is never
-relaxed for benchmarking convenience. The raw-versus-library delta is therefore framing,
-addressing and queueing — not duty-cycle logic, and that has to be said with the result.
+## Per payload: `exchanges.csv`
 
-## Not measured — and why
+| Column | Unit | Meaning |
+|---|---|---|
+| `distance_m`, `round`, `key` | | which run this payload belongs to; `key` is `<technology>/<configuration>` |
+| `seq` | | position in the run, from 0 |
+| `payload_bytes` | bytes | application payload handed to `send()` |
+| `total_bytes` | bytes | what the library reports it put on the air: payload plus the library's own framing (7 bytes on LoRa, 0 on ESP-NOW and Zigbee). Radio-level framing is not included. |
+| `latency_us` | µs | time inside `send()`: from handing over the payload until the library had its ack or gave up |
+| `status`, `status_name` | | the library's `SendStatus`: `Ok`, `Timeout`, `Failed`, `DutyCycleExceeded`, … |
+| `acked` | 0/1 | whether the library reported the payload acknowledged. This is the delivery signal. |
+| `duty_pct` | % | the library's duty-cycle figure after this payload: airtime used in its one-hour window. It starts from zero at every flash. |
 
-These are asked for by the thesis exposé's RQ1 metric set. They are listed here, and printed by
-the analysis tooling, rather than silently omitted.
+## Per run: `runs.jsonl`
 
-**One-way delay and one-way jitter.** Requires clock synchronisation between the two boards;
-`becker2025` used Reference Broadcast Synchronization over the wireless link for exactly this.
-Round-trip ÷ 2 is not a substitute: these links are strongly asymmetric — a Zigbee gateway
-broadcast leg and the node's unicast reply differ by an order of magnitude. Round-trip latency and
-its variation are reported instead, and labelled as such.
+| Field | Meaning |
+|---|---|
+| `distance_m`, `round`, `key`, `tech`, `name` | where and what; `distance_m` is null for baseline holds |
+| `params` | the configuration: payload size, and for LoRa `sf`, `bw`, `cr`, `pwr`, `preamble` |
+| `exchanges_planned` | payloads the run was built to send; 0 for a baseline hold |
+| `started_at`, `run_id` | start time; the one-byte id the gateway sees |
+| `home.acked`, `home.attempts` | whether the gateway acknowledged the announcement on LoRa home, and on which attempt (1–3) |
+| `summary.sent`, `summary.acked` | payloads sent and acknowledged |
+| `summary.elapsed_ms` | wall clock of the loop, first `send()` to last return |
+| `summary.duty_pct` | the library's duty-cycle figure at the end of the run |
+| `summary.aborted` | 1 if the run stopped after 10 losses in a row |
+| `report.requested` | whether the gateway acknowledged the end message |
+| `report.received` | payloads the gateway itself counted in this run |
+| `report.rssi_dbm`, `report.snr_db` | mean signal strength and signal-to-noise ratio of those payloads at the gateway. LoRa only. |
+| `delivery.pdr`, `delivery.gateway_pdr` | `acked / sent` and `received / sent` |
+| `energy.run`, `energy.idle` | the two power windows, [below](#energy) |
+| `idle_ms` | length of the idle hold the node reports, for baseline runs |
+| `payload_airtime_ms` | calculated time-on-air of one data frame; 0 off LoRa |
+| `duty_wait_s` | how long the script waited for airtime budget before this run |
+| `error`, `complete` | `ERR` text or `timeout`; whether the node reached `END` |
 
-**PHY-level payload efficiency.** `totalBytes` counts framing that **ConnectionLib** adds — LoRa's
-6-byte software header, which exists because raw SX1278 has no addressing, versus zero added bytes
-for ESP-NOW and Zigbee, which address natively. The 802.11 and 802.15.4 framing underneath is not
-instrumented by any backend. Reported as "library framing efficiency"; reading it as on-air
-efficiency would imply a fabricated 100 % for two of the three radios.
+## Derived metrics
 
-**Low-level PHY counters** (retry counts inside the radio, CCA failures, backoff). ESP-NOW and
-Zigbee perform their own retries and expose only the outcome. This is the practical form of
-practice §1's "low-level metrics may not be portable across hardware architectures": here they are
-not available at all, so no comparison can rest on them.
+Computed by `bench/summary.py`, one row per (distance, configuration), rounds pooled. These are
+what `bench.py status` and `plot.py` show.
 
-## Where the numbers are
+| Metric | Unit | Definition |
+|---|---|---|
+| Delivery (`pdr`) | fraction | acknowledged ÷ sent. What an application using the library sees. |
+| Delivery at the gateway (`gateway_pdr`) | fraction | gateway's count ÷ sent, over runs whose report came back. Can exceed `pdr`: a payload can arrive while its ack is lost. |
+| Delivery latency (`latency_us`) | µs | distribution of `latency_us` over acknowledged payloads: median, min, max, quartiles, IQR, 95th and 99th percentile, mean, standard deviation |
+| Median confidence interval (`latency_median_ci_us`) | µs | non-parametric 95 % interval for the median; absent below 6 samples |
+| Goodput (`goodput_bps`) | bit/s | acknowledged payload bits ÷ `elapsed_ms`. One way, of a back-to-back burst. |
+| Framing efficiency (`framing_efficiency`) | fraction | payload bytes ÷ `total_bytes`. Library framing only. |
+| Signal at the gateway (`gw_rssi_dbm`, `gw_snr_db`) | dBm, dB | mean of the runs' reports. LoRa only. |
+| Duty cycle (`duty_pct`) | % | highest per-payload value in the run |
+| Run current (`energy.mean_ua`) | µA | mean current of the node over the loop |
+| Energy per sent payload (`energy_per_sent_mj`) | mJ | energy of the loop ÷ payloads sent |
+| Energy per delivered payload (`energy_per_delivered_mj`) | mJ | energy of the loop ÷ payloads acknowledged. Rises as the link degrades, because waiting for lost acks is paid too. |
+| … above standing current (`excess_energy_per_delivered_mj`) | mJ | (run current − that radio's standing current) × duration × voltage ÷ acknowledged. Needs the baseline. |
+| Standing current | µA | mean current of each 30 s baseline hold: `none` (board floor), `zigbee`, `espnow`, `lora` |
 
-Measured values, the cross-technology comparison and the open problems live in
-[findings.md](findings.md). This document says what is measured and why; that one says what came
-out. The literature each metric rests on is tabulated there and derived in full in ConnectionLib's
-`docs/measurement-methodology.md`.
+Single numbers are medians, never means, and percentiles are nearest-rank, not interpolated.
 
-## Aggregation (practice P11)
+## Energy
 
-Single numbers are **medians**, never means, and always accompanied by a spread. Per-exchange
-samples are kept in `raw.csv` so any other statistic can be recomputed without re-running.
+A Nordic PPK2 sources and meters the node at its 5 V header pin, 5.0 V, with the battery removed
+and the USB cable's power wire cut. Each window record holds:
 
-Following the slides' guidance on choosing the function for the question:
+| Field | Unit | Meaning |
+|---|---|---|
+| `duration_s` | s | wall clock between the two marker lines |
+| `samples` | | samples folded into the window (about 71,000 per second) |
+| `mean_ua`, `min_ua`, `max_ua` | µA | of those samples |
+| `charge_mc` | mC | mean current × duration |
+| `energy_mj` | mJ | charge × voltage |
+| `voltage_mv` | mV | the sourced voltage |
 
-- **Peak capability** of a configuration — minimum latency, which suppresses external-load effects.
-- **Typical performance** — median, with IQR, plus box/violin plots of the distribution.
-- **Worst-case / soft-realtime** — 95th and 99th percentiles, by nearest rank. Percentiles are
-  deliberately **not interpolated**: interpolation invents a value the sample never contained,
-  and the confidence machinery here is non-parametric order statistics.
+There are two windows:
+
+- **`run`**: from `RUN,begin` to `RUN,end`, i.e. the `send()` loop only. The announcement before
+  it and the report after it are outside.
+- **`idle`**: from `IDLE,begin` to `IDLE,end`, a baseline hold with the radio able to receive and
+  nothing sent.
+
+The PPK2's samples reach the host about 0.47 s after the current they describe. The script
+measures that latency at every start and shifts each window by it; what is left is a few tens of
+milliseconds at each edge. Runs are sized to last seconds for that reason.
+
+## What to keep in mind when reading the numbers
+
+- **Absolute currents are high by a constant.** The 5 V tap includes the power converter's loss,
+  the USB-serial chip, and the XBee, which is powered whatever firmware runs. Differences between
+  configurations are the trustworthy quantity.
+- **Zigbee's standing current is inside the board floor**, for the same reason. The `zigbee` hold
+  reads the same as `none`; that does not mean the XBee is free.
+- **"Above standing current" is not purely the radio.** In a hold the processor mostly sleeps;
+  during a LoRa `send()` the radio driver keeps it busy. Part of the difference is the ESP32.
+- **Goodput is burst goodput.** On LoRa the 10 % duty cycle limits the sustained rate to about a
+  tenth of it.
+- **Zigbee latency is mostly the serial link** between the ESP32 and the XBee at 9600 baud.
+- **Energy is the sender's.** The gateway is not metered.
+- **The LoRa SNR reading tops out** around +14 dB; above that it says only "strong".
+
+## Not recorded
+
+- **Signal quality for ESP-NOW and Zigbee.** Neither exposes it without perturbing the
+  measurement, and the library version in use has no capture for it. Neither exposes SNR at all.
+- **Per-payload signal quality.** The gateway reports one mean per run; the library's ack does
+  not carry RSSI back to the node.
+- **One-way delay and jitter.** They need synchronised clocks. Latency here includes the ack's
+  way back.
+- **Radio-internal retries and channel-access counters.** ESP-NOW and Zigbee retry inside the
+  radio and expose only the outcome; their retries are part of the latency.
+- **Bytes on the air below the library**, i.e. the 802.11 and 802.15.4 framing.
+- **The gateway's energy.**
+- **Environment**: temperature, interference, exact antenna placement. Use `--note`.
+
+## The no-library comparison
+
+[ConnectionLibBenchmarkRaw](https://github.com/GregorHolzer/ConnectionLibBenchmarkRaw) runs the
+same node and gateway on the vendor APIs and records exactly the same fields, with
+`meta.json` → `firmware.stack` set to `raw`. It covers ESP-NOW and Zigbee only: on LoRa the
+delivery signal is a ConnectionLib feature with no raw counterpart.

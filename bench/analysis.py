@@ -1,8 +1,7 @@
-"""Statistics shared by the plotting and the audit.
+"""Statistics behind every reported number.
 
-Pure standard library: no numpy or scipy. Two reasons - the Pi's Python is EXTERNALLY-MANAGED so
-every dependency is friction, and every statistic here is deliberately simple enough to be read
-and checked by hand, which matters more for an audit than convenience.
+Pure standard library: no numpy or scipy. Every statistic here is deliberately simple enough to
+be read and checked by hand.
 
 Aggregation follows practice P11 (slide 19 of `02_experimentation.pdf`): a single number is always
 a median, percentiles are nearest-rank rather than interpolated, and the raw samples stay available
@@ -11,7 +10,6 @@ so any other statistic can be recomputed without re-running the campaign.
 
 import math
 import statistics
-from collections import defaultdict
 
 
 def percentile(values, pct):
@@ -93,106 +91,3 @@ def median_confidence_interval(values, confidence=0.95):
         else:
             break
     return best
-
-
-def linear_regression(xs, ys):
-    """Ordinary least squares slope, plus Pearson r and an approximate two-sided p-value.
-
-    Used to detect *systematic* drift across a campaign. Practice P2 is the reason this exists:
-    a significant slope means the error is systematic, and slide 12 is explicit that repetition
-    cannot mitigate that - so it must be reported rather than averaged away.
-    """
-    n = len(xs)
-    if n < 3:
-        return None
-    mean_x, mean_y = statistics.fmean(xs), statistics.fmean(ys)
-    sxx = sum((x - mean_x) ** 2 for x in xs)
-    syy = sum((y - mean_y) ** 2 for y in ys)
-    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    if sxx == 0 or syy == 0:
-        return None
-    slope = sxy / sxx
-    r = sxy / math.sqrt(sxx * syy)
-    r = max(-0.999999, min(0.999999, r))
-    # t = r*sqrt(n-2)/sqrt(1-r^2); the normal approximation to its tail is adequate here, where
-    # the question is "is there an obvious trend", not a precise p.
-    t = abs(r) * math.sqrt((n - 2) / (1 - r * r))
-    p = math.erfc(t / math.sqrt(2))
-    return {"slope": slope, "r": r, "p": p, "n": n, "intercept": mean_y - slope * mean_x}
-
-
-def gross_outliers(values, factor=3.0):
-    """Indices of exchanges taking more than `factor` times the median.
-
-    This is the external-load detector (practice P5), in preference to Tukey fences. Tukey assumes
-    a roughly normal spread; these latency distributions are tightly peaked with a long tail, so a
-    quarter of a perfectly healthy ESP-NOW run lands outside a 1.5*IQR fence purely because the
-    IQR is a few tens of microseconds. That flags every run and therefore says nothing.
-
-    "More than three times the typical exchange" is scale-free, survives quantised data, and
-    matches what an external-load event actually looks like: occasional large excursions rather
-    than a slightly wider distribution.
-    """
-    if len(values) < 4:
-        return None
-    median = statistics.median(values)
-    if median <= 0:
-        return None
-    return [i for i, v in enumerate(values) if v > factor * median]
-
-
-def tukey_outliers(values):
-    """Indices outside the 1.5*IQR fences - the classic external-load signature (practice P5).
-
-    Returns None when the test does not apply rather than a misleading answer. With a zero IQR -
-    common here, where a quantised latency repeats the same value for most of a run - both fences
-    collapse onto the median and *every* distinct value is labelled an outlier. A check that fires
-    on every run carries no information, so the degenerate case is reported as such.
-    """
-    if len(values) < 4:
-        return None
-    p25, p75 = percentile(values, 25), percentile(values, 75)
-    iqr = p75 - p25
-    if iqr <= 0:
-        return None
-    low, high = p25 - 1.5 * iqr, p75 + 1.5 * iqr
-    return [i for i, v in enumerate(values) if v < low or v > high]
-
-def group_exchanges(rows, ok_only=True, field="rtt_us"):
-    """Group raw CSV rows into {point_key: {rotation: [values]}}."""
-    grouped = defaultdict(lambda: defaultdict(list))
-    for row in rows:
-        if ok_only and row.get("ok") != "1":
-            continue
-        try:
-            value = float(row[field])
-        except (KeyError, ValueError):
-            continue
-        if ok_only and value <= 0:
-            continue
-        grouped[row["point_key"]][int(row["rotation"])].append(value)
-    return grouped
-
-
-def summarise_points(rows, points):
-    """One summary record per (point, rotation), the unit both the plots and the audit work on."""
-    by_point = group_exchanges(rows, field="rtt_us")
-    send_by_point = group_exchanges(rows, field="send_us")
-    meta = {p["point_key"]: p for p in points}
-
-    out = []
-    for point_key, rotations in sorted(by_point.items()):
-        for rotation, values in sorted(rotations.items()):
-            record = meta.get(point_key, {})
-            entry = {
-                "point_key": point_key,
-                "rotation": rotation,
-                "tech": point_key.split("/")[0],
-                "factor": record.get("factor", point_key.split("/")[1] if "/" in point_key else ""),
-                "level": record.get("level", ""),
-                "params": record.get("params", {}),
-                "rtt_us": describe(values),
-                "send_us": describe(send_by_point.get(point_key, {}).get(rotation, [])),
-            }
-            out.append(entry)
-    return out

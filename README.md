@@ -1,113 +1,87 @@
 # ConnectionLibBenchmark
 
-Benchmark suite for [ConnectionLib](https://github.com/GregorHolzer/ConnectionLib), comparing
-LoRa, Zigbee and ESP-NOW on real hardware (two LilyGO T-Beams, one acting as gateway and one as
-node) for the FORTE forest-sensor deployment.
+Distance benchmark for [ConnectionLib](https://github.com/GregorHolzer/ConnectionLib): LoRa, Zigbee
+and ESP-NOW on two LilyGO T-Beams, measured at a series of distances (10 m … 2 km) for the FORTE
+forest-sensor deployment.
 
-Three separate per-technology benchmarks, each sweeping the hyperparameters its radio actually
-exposes, plus a campaign runner that produces enough repeated measurements to judge whether the
-results are *reliable* — and a script that audits the benchmark against documented good practice.
+- The **gateway** is flashed once, placed, and left alone. It has no host. It waits on a fixed
+  LoRa setting until the node announces a run, then serves only that run's radio.
+- The **node** stays with the laptop and the PPK2. `bench.py` re-flashes it for every
+  configuration, starts it, and records what it prints.
 
 ## Quick start
 
-The boards are attached to the machine you run this on — everything is local.
-
 ```bash
-pio run -t upload -e bench_node                       # flash, once per campaign
-pio run -t upload -e bench_gateway
-./tools/selftest.py                                   # prove the hardware path first
-./run_benchmark.py --tech espnow --quick              # one technology, a few minutes
-./run_campaign.py --preset full                       # the 10h campaign
-./progress.py --watch                                 # live view of a running campaign
-./verify_practices.py --results results/<campaign>    # the audit
-./plot_results.py  --results results/<campaign>       # per-technology figures
-./plot_comparison.py --results results/<campaign>     # cross-technology comparison
+# once, at the desk, both boards on USB
+./bench.py prepare --node-port /dev/serial/by-id/<node> --gateway-port /dev/serial/by-id/<gateway> \
+                   --zigbee-peer <64-bit address of the gateway's XBee>
+
+# once, anywhere: board floor and the standing current of each radio
+./bench.py baseline
+
+# at every spot
+./bench.py site --distance 10
+./bench.py site --distance 100 --note "edge of the clearing, light rain"
+
+./bench.py status                      # what has been recorded, as a table
+./plot.py --campaign field-<date>      # figures/<campaign>/: technologies, lora_factors, latency_cdf
 ```
 
-Two arms and two capture modes, both off by default so every campaign stays comparable with those
-recorded before they existed:
+`site` runs Zigbee, ESP-NOW, then 16 LoRa settings: 18 flashes, about 6 s of build and 15 s of
+upload each. Interrupt it and run the same command again to resume. `--rounds 2` repeats the set
+in reverse order. All sites of one day land in `results/field-<date>/` unless `--campaign` says
+otherwise.
 
-```bash
-./run_campaign.py --preset standard --rssi   # + per-packet RSSI/SNR (perturbs ESP-NOW & Zigbee)
-```
+Needs PlatformIO, `pyserial`, `matplotlib` and `ppk2-api`; run with the interpreter of a venv that
+has them (`~/.venvs/platformio/bin/python bench.py …`). `--no-power` records without the PPK2.
+Host-side tests need no hardware: `python -m unittest discover tests`.
 
-`stack=raw` points are swept automatically alongside the library ones: the same exchange driven
-straight onto RadioLib / `esp_now.h` / xbee-arduino, so the difference measures what ConnectionLib
-costs. See [docs/metrics.md](docs/metrics.md) for what each arm does and does not bypass.
+## How it measures
 
-`plot_results.py` asks what each radio's knobs do; `plot_comparison.py` asks how the three compare
-against each other, on the RQ1 metric set, with each technology represented by its best
-configuration rather than its baseline:
+A one-way transfer, node to gateway, as fast as the link allows. The measured loop is the
+library's `send()` and nothing else: it returns once the library has its confirmation of delivery
+— ESP-NOW's MAC ack, Zigbee's APS ack, ConnectionLib's software ack on LoRa — and the next payload
+goes out at once. Time in `send()` is the delivery latency, `acknowledged` is the delivery. No
+retries, no pause, and results are kept in RAM and printed after the run, so the serial port is in
+neither the timings nor the energy.
 
-```bash
-./plot_comparison.py --results results/<campaign> --report-flat   # + which knobs do nothing
-./plot_comparison.py --results results/<campaign> --best-by latency --pdr-floor 0.99
-```
+The gateway application answers no data frame. It counts what arrives and, when the node asks
+after its run, sends one report with that count and the mean RSSI/SNR. Details and every metric:
+[docs/metrics.md](docs/metrics.md). How the gateway follows LoRa settings, what a site costs in
+duty cycle, and what limits the result: [docs/field-campaign.md](docs/field-campaign.md).
 
-Sweeps whose knob moves neither latency nor energy can be left out of the per-technology set:
+## Layout
 
-```bash
-./plot_results.py --results results/<campaign> \
-    --skip-factor espnow:channel --skip-factor espnow:timeout
-```
+| | |
+|---|---|
+| `src/node.cpp` | the measured loop; one configuration per build |
+| `src/NodeControl.cpp` | around the loop: announce the run to the gateway, end it, take the report |
+| `src/gateway.cpp` | the receiver: WAIT on LoRa home, RUN on the one radio a config named |
+| `src/Frames.hpp` | the application frames: data, config, end, report |
+| `src/Config.hpp` | the configuration macros and the EU envelope as `static_assert`s |
+| `src/Transports.cpp` | the only file that names a ConnectionLib backend |
+| `bench.py` | the command line |
+| `bench/configs.py` | which configurations exist |
+| `bench/firmware.py`, `bench/board.py` | write the config header and flash; reset and read the node |
+| `bench/runner.py` | one run: duty-cycle wait, flash, capture, PPK2 windows, record |
+| `bench/airtime.py` | LoRa time-on-air and the persisted duty-cycle ledger |
+| `bench/records.py`, `bench/results.py`, `bench/summary.py` | parse, store, turn into metrics |
+| `tools/bench_board.py` | power the node from the PPK2 and watch its serial, outside a campaign |
 
-Requires PlatformIO, `pyserial`, `matplotlib` and `ppk2-api` (the last only for energy
-measurement). A venv containing all of them is the easiest route; symlink its `pio` onto your
-`PATH`.
+The firmware is configured at build time: `bench/firmware.py` writes `include/bench_config.h`,
+`src/Config.hpp` includes it, and a configuration outside the EU envelope does not compile.
 
-### Waking the bench remotely
-
-The bench host is normally off. A Raspberry Pi on the same network acts as an always-on jump host
-and power switch, so the working chain from outside is:
-
-```
-VPN → raspberrypi → start_desktop → ssh desktop → work
-```
-
-`start_desktop`, `stop_desktop` and `desktop_status` live in `~/.local/bin` on the Pi.
-`stop_desktop` refuses to power the machine off while a campaign is running — a full campaign is
-ten hours of bench time and is not reproducible on a whim.
-
-> **Historical note.** The boards used to live on the Pi itself, driven over SSH with a `sync.sh`
-> that pushed this repo to it. That is gone: the boards are now on the bench host directly, which
-> removes a whole class of problems (a `--delete` sync that could destroy a results tree, the Pi's
-> USB power budget, and serial latency over two hops). None of the benchmark code changed in the
-> move — it always ran locally against local serial ports.
-
-## Why one firmware for everything
-
-All three backends are compiled into a single image and selected at run time over a serial
-command protocol (`CFG …` / `RUN`). A campaign visits several hundred configuration points, and
-rebuilding plus reflashing both boards costs ~80 s each time — build-time configuration would
-spend the campaign flashing instead of measuring. Runtime configuration needs exactly two flashes
-for the whole run. This required no changes to ConnectionLib.
-
-## The three benchmarks
-
-| | Swept | Points | Exchanges/point |
-|---|---|---|---|
-| **LoRa** | spreading factor, bandwidth, coding rate, TX power, preamble, payload | 15 | 20 |
-| **ESP-NOW** | channel, encryption, payload, send timeout | 30 | 100 |
-| **Zigbee** | payload, unicast vs. broadcast | 8 | 100 |
-
-The asymmetry is a finding, not an oversight: ConnectionLib exposes LoRa's PHY parameters and
-deliberately hides ESP-NOW's and Zigbee's, because those radios manage their own.
-
-**LoRa's duty cycle governs the whole campaign.** The 10 % ETSI limit means wall clock is at least
-ten times airtime, and one transmission at SF12/32 B costs 2.5 s. That is why the full campaign is
-budgeted at 10 h and why LoRa completes ~6 repetitions where ESP-NOW completes ~28. The constraint
-is reported as a result rather than relaxed — see [docs/regulations.md](docs/regulations.md).
+The no-library comparison lives in
+[ConnectionLibBenchmarkRaw](https://github.com/GregorHolzer/ConnectionLibBenchmarkRaw), the same
+node and gateway on the raw vendor APIs. It is driven from here with `--firmware`.
 
 ## Documentation
 
-- [docs/benchmarking-practices.md](docs/benchmarking-practices.md) — the good practices this suite
-  is built to follow, written as checkable statements. `verify_practices.py` enforces them.
-- [docs/regulations.md](docs/regulations.md) — the EU radio parameter envelope. Sweeps move within
-  it; the firmware rejects configurations that would leave it.
-- [docs/metrics.md](docs/metrics.md) — what is measured, how, and what this bench honestly cannot
-  measure.
-- [docs/findings.md](docs/findings.md) — the measured state: cross-technology comparison, what
-  ConnectionLib costs against the raw radio API, signal quality, and the open problems. Every
-  number traces to a recorded campaign.
-- [docs/field-campaign.md](docs/field-campaign.md) — the design for running unattended across up to
-  4 km with one host: a lease-based control channel and gateway-side logging, and how to run it.
+- [docs/field-campaign.md](docs/field-campaign.md) — running a campaign, the LoRa handshake, duty
+  cycle, and the limits of what a distance campaign shows.
+- [docs/scripts.md](docs/scripts.md) — every script and every flag.
+- [docs/metrics.md](docs/metrics.md) — every recorded field and derived metric, and what is not recorded.
+- [docs/regulations.md](docs/regulations.md) — the EU radio envelope the configurations stay in.
+- [docs/findings.md](docs/findings.md) — the September 2026 bench campaigns (previous harness) and
+  the open hardware problems, which still apply.
+- [docs/benchmarking-practices.md](docs/benchmarking-practices.md) — the practices the suite follows.

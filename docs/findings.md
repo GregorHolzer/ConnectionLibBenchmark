@@ -1,5 +1,12 @@
 # Findings
 
+> **These are the bench campaigns of September 2026, recorded with the harness that preceded the
+> flash-per-configuration refactor** (one firmware configured over serial `CFG`/`RUN`, the gateway
+> initiating, retries, `run_campaign.py`, `RFCHECK`). That tooling is in the git history at
+> `117a3f8`. The numbers stand; they are not poolable with distance campaigns, which use a
+> different exchange and different roles (see [field-campaign.md](field-campaign.md)). §4 and §8
+> are still open and apply to the new harness unchanged.
+
 Measured state of the benchmark as of 2026-09-23. Every number here comes from a recorded campaign
 under `results/`; nothing is estimated unless it says so. Where a figure contradicts an earlier
 claim in this repo, the contradiction is stated rather than quietly corrected — a benchmark whose

@@ -120,7 +120,7 @@ def identify(ser):
 
 def report_current(power, seconds, label):
     """Mean/min/max over a window. Near-zero means the rail is not reaching the board."""
-    window = power.open(label, 0)
+    window = power.open(label)
     time.sleep(seconds)
     result = power.close(window)
     if not result:
