@@ -1,0 +1,16 @@
+{
+  "campaign": "field-20261010",
+  "boards": {
+    "node_port": "/dev/serial/by-id/usb-1a86_USB_Single_Serial_573C000618-if00",
+    "node_mac": "08:f9:e0:d0:43:1c",
+    "gateway_mac": "08:f9:e0:d0:38:30",
+    "gateway_xbee64": "0013A20042035B39",
+    "prepared_at": "2026-10-08T14:00:00"
+  },
+  "firmware": {
+    "stack": "lib",
+    "lora_header_bytes": 7
+  },
+  "duty_cycle_enforced": false,
+  "started_at": "2026-10-10T09:30:56"
+}
