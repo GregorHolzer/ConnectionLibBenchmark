@@ -5,7 +5,8 @@
  *
  *     result = link.send(gateway, payload)
  *
- * repeated. send() returns once the library has its confirmation of delivery (ESP-NOW's MAC ack,
+ * repeated. Above kNativeLimitBytes the link is a FragmentingTransport and one send() is several
+ * packets. send() returns once the library has its confirmation of delivery (ESP-NOW's MAC ack,
  * Zigbee's APS ack, ConnectionLib's software ack on LoRa) or has given up waiting for it. The
  * time spent in send() is the delivery latency; `acknowledged` is the delivery. No retries, no
  * pause, and nothing is printed until the run is over.
@@ -60,7 +61,7 @@ struct Sample {
 
 void runTransfer(Transport &link) {
     const Address gateway = gatewayAddress(kTech);
-    uint8_t payload[frames::kMaxBytes];
+    static uint8_t payload[kPayloadBytes];   // static: up to 1 kB, kept off the stack
     std::vector<Sample> samples;
     samples.reserve(kExchanges);   // allocated up front: nothing but the radio happens in the loop
     uint32_t lossStreak = 0;
@@ -114,7 +115,7 @@ void setup() {
         ready = announce(link);
     } else if (kTech != Tech::None) {   // a standing-current hold: no gateway involved
         board::loRaRail(kTech == Tech::LoRa);
-        link = makeTransport(kTech, kPoint, kAckWaitMs);
+        link = makeTransport(kTech, kPoint, kAckWaitMs, false);
         ready = link->setup();
     }
 

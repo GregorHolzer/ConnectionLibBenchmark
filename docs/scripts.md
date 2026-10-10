@@ -64,15 +64,23 @@ bench.py --campaign field-20261010 baseline
 
 ### `site`
 
-At every spot. Flashes and measures Zigbee, ESP-NOW, the LoRa baseline, then the other 15 LoRa
-settings in an order shuffled per distance. Runs already recorded for this distance are skipped,
+At every spot. Flashes and measures the Zigbee, ESP-NOW and LoRa baselines, then the other 24
+points in an order shuffled per distance: the payload sizes 8, 16, 32, 84, 256 and 512 B
+on every radio, and LoRa's other knobs. Runs already recorded for this distance are skipped,
 so the same command resumes an interrupted visit. Ctrl-C stops between runs.
+
+If the Zigbee or ESP-NOW baseline delivers nothing, that radio's other points at this distance
+are skipped; LoRa's always run. The latest baseline decides: to test a radio again at the same
+distance, run its baseline as a further round, e.g.
+`site --distance 22 --rounds 2 --config zigbee/baseline --config espnow/baseline`. If it
+delivers this time, the next plain `site` at that distance runs that radio's other points.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--distance METRES` | required | Distance to the gateway. Recorded with every run; `0` for the desk. |
 | `--rounds N` | `1` | Repeat the whole set N times. Even rounds run in reverse order, so drift during the visit lands on both sides of every configuration. |
 | `--tech NAME` | all three | Limit to `zigbee`, `espnow` or `lora`. Repeat the flag for two of them. |
+| `--config KEY` | all | Limit to single configurations by name, e.g. `zigbee/payload=512`. Repeat the flag for several. |
 | `--note TEXT` | empty | Free text stored in `sites.jsonl`: weather, obstacles, antenna height. |
 
 ```bash
@@ -83,7 +91,7 @@ bench.py --campaign field-20261010 site --distance 100 --tech lora --rounds 2
 One line is printed per run, for example:
 
 ```
-[3/18] lora/baseline
+[3/27] lora/baseline
   20/20 delivered, gateway counted 20, run 104.8 mA, -68 dBm at the gateway
 ```
 
@@ -117,12 +125,31 @@ Defined in [`bench/configs.py`](../bench/configs.py); change them there.
 
 | | Configurations | Payloads per run |
 |---|---|---|
-| Zigbee | 1: 32-byte payload, unicast | 100 |
-| ESP-NOW | 1: 32-byte payload, channel 1 | 1500 |
-| LoRa | 16: baseline SF9 / 125 kHz / CR 4/7 / 7 dBm / preamble 8 / 32 B, plus each other level of one knob at a time | 20 |
+| Zigbee | 3: baseline 32 B unicast, plus each other payload size | 100 |
+| ESP-NOW | 6: baseline 32 B on channel 1, plus each other payload size | 1500 |
+| LoRa | 18: baseline SF9 / 125 kHz / CR 4/7 / 7 dBm / preamble 8 / 32 B, plus each other level of one knob at a time | 20; 5 at 256 and 512 B |
 
-LoRa levels: spreading factor 7–12; bandwidth 125, 250 kHz; coding rate 4/5–4/8; power 2, 5,
-7 dBm; preamble 8, 16; payload 8, 16, 32, 84 bytes. Idle holds last 30 s (`IDLE_MS`).
+Zigbee is measured at 8, 16 and 32 B only: in the field its runs with 84 B frames lost the link
+mid-run ([field-campaign.md](field-campaign.md#zigbee-and-full-size-frames)). ESP-NOW and LoRa
+use the payload sizes below, in two groups:
+
+- **The comparison** (`PAYLOADS`): 8, 16, 32, 84 bytes. 84 B is Zigbee's single-packet limit, so
+  this is the range all three carry unfragmented, the one the thesis methodology confines the
+  comparison to.
+- **Library capability** (`CAPABILITY_PAYLOADS`): 256, 512 bytes, which every radio can only
+  carry fragmented. Reported apart from the comparison, see
+  [metrics.md](metrics.md#larger-payloads-a-library-capability).
+
+Other LoRa levels (`LORA_FACTORS`): spreading factor 7–12; bandwidth 125, 250 kHz; coding rate
+4/5–4/8; power 2, 5, 7 dBm; preamble 8, 16. Idle holds last 30 s (`IDLE_MS`).
+
+Configurations are named `<technology>/<what differs from the baseline>`: `zigbee/baseline`,
+`espnow/payload=84`, `lora/sf=12`. The ESP-NOW channel is fixed, not swept: it changes the
+interference at a site, not the radio.
+
+To change what is measured: edit `PAYLOADS`, `CAPABILITY_PAYLOADS`, `LORA_FACTORS` or
+`EXCHANGES`. A payload above 1024 B also needs `kMaxMessageBytes` raised in `src/Config.hpp`. After any change under `src/`,
+run `prepare` again so the gateway carries the same firmware as the node.
 
 ## plot.py
 
@@ -134,13 +161,16 @@ plot.py --campaign NAME
 |---|---|---|
 | `--campaign NAME` | yes | Directory under `results/` to read. |
 
-Prints the same table as `bench.py status` and writes three figures to `figures/<campaign>/`:
+Prints the same table as `bench.py status` and writes four figures to `figures/<campaign>/`:
 
 | File | Shows |
 |---|---|
 | `technologies.png` | Zigbee, ESP-NOW and LoRa at their baseline, one panel per metric. Dots for a single distance, lines against distance for several. |
+| `payloads.png` | Zigbee, ESP-NOW and LoRa against payload size, one row per metric and one column per distance. The shaded range is the fragmented capability sizes. |
 | `lora_factors.png` | Each metric against the levels of each LoRa knob, with the airtime floor under latency. One line per distance. |
 | `latency_cdf.png` | The whole distribution of delivery latency per technology, one panel per distance. |
+
+`technologies.png` and `latency_cdf.png` show the three 32 B baselines only.
 
 ## tools/bench_board.py
 

@@ -43,12 +43,12 @@ void enterWait() {
     Serial.printf("WAIT,%s\n", g_link->setup() ? "ok" : "SETUP FAILED");
 }
 
-void enterRun(Tech tech, const LoRaParams &point, uint32_t leaseMs) {
+void enterRun(Tech tech, const LoRaParams &point, uint32_t leaseMs, bool fragmented) {
     g_link.reset();
     if (tech != Tech::LoRa) {
         board::loRaRail(false);
     }
-    g_link = makeTransport(tech, point, kOwnAckWaitMs);
+    g_link = makeTransport(tech, point, kOwnAckWaitMs, fragmented);
     bool ok = g_link->setup();
     g_running = true;
     g_runStartMs = millis();
@@ -56,9 +56,9 @@ void enterRun(Tech tech, const LoRaParams &point, uint32_t leaseMs) {
     g_report = {};
     g_rssiSum = g_snrSum = 0;
     g_readings = 0;
-    Serial.printf("RUN,%s,sf%u,bw%u,cr%u,%ddBm,%s\n", g_link->technologyName(),
+    Serial.printf("RUN,%s,sf%u,bw%u,cr%u,%ddBm,%s,%s\n", g_link->technologyName(),
                   point.spreadingFactor, point.bandwidthKHz, point.codingRate, point.txPowerDbm,
-                  ok ? "ok" : "SETUP FAILED");
+                  fragmented ? "fragmenting" : "bare", ok ? "ok" : "SETUP FAILED");
 }
 
 /** @brief A config is honoured only inside the EU envelope the node was built against. */
@@ -75,7 +75,8 @@ void onConfig(const std::vector<uint8_t> &in) {
     LoRaParams point{in[frames::kBwKHz], in[frames::kSf], in[frames::kCr],
                      static_cast<int8_t>(in[frames::kPower]), in[frames::kPreamble]};
     if (acceptable(in[frames::kTechnology], point)) {
-        enterRun(static_cast<Tech>(in[frames::kTechnology]), point, in[frames::kLease4s] * 4000UL);
+        enterRun(static_cast<Tech>(in[frames::kTechnology]), point, in[frames::kLease4s] * 4000UL,
+                 in[frames::kFragmenting] != 0);
     }
 }
 

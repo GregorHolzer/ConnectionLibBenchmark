@@ -58,7 +58,7 @@ permissive.
 
 | Parameter | Value | Notes |
 |---|---|---|
-| ESP-NOW channel | 1, 6, 11 (swept) | The three non-overlapping 2.4 GHz channels. |
+| ESP-NOW channel | 1 (fixed) | Not swept: every channel has the same modulation and power, so a channel differs only by the Wi-Fi around a site. |
 | ESP-NOW TX power | ESP32 default (~20 dBm EIRP) | Not exposed by `EspNowConfig`; would need a library change. |
 | Zigbee channel | set by PAN association | Both modules currently associate on channel 0x15. |
 | Zigbee power level | XBee default | `PL` is settable only via AT frames, not through `ZigbeeConfig`. |

@@ -1,6 +1,7 @@
-"""The three figures of a campaign. plot.py is the command line; this is the drawing.
+"""The four figures of a campaign. plot.py is the command line; this is the drawing.
 
     technologies.png   Zigbee, ESP-NOW and LoRa at their baseline, one panel per metric
+    payloads.png       the three against payload size, one column per distance
     lora_factors.png   what each LoRa knob does: metric against the knob's levels
     latency_cdf.png    the whole latency distribution per technology, not just its median
 
@@ -138,10 +139,11 @@ def plot_technologies(rows, standing, path):
 
 
 def _predicted_latency_ms(params):
-    """Payload airtime plus the library ack's airtime: what LoRa latency cannot go below."""
+    """Airtime of every packet of the payload and of its ack: what LoRa latency cannot go below."""
     radio = {"sf": params["sf"], "bw_khz": params["bw"], "coding_rate": params["cr"],
              "preamble": params["preamble"]}
-    return airtime.time_on_air_ms(params["payload"], **radio) + airtime.time_on_air_ms(0, **radio)
+    return sum(airtime.time_on_air_ms(size, **radio) + airtime.time_on_air_ms(0, **radio)
+               for size in configs.packet_sizes(configs.Config("lora", "", params)))
 
 
 def plot_lora_factors(rows, path):
@@ -185,6 +187,38 @@ def plot_lora_factors(rows, path):
     axes[1][0].legend(frameon=False, fontsize=8, loc="upper left")
     _finish(figure, path, "LoRa, one knob at a time. Grey band: the baseline "
                           "(SF9, 125 kHz, 4/7, 7 dBm, preamble 8, 32 B). Rows share their y axis.")
+
+
+def plot_payloads(rows, path):
+    """One row per metric, one column per distance; x is the payload size, one line per radio."""
+    sweep = [row for row in rows if row["name"].split("=")[0] in ("baseline", "payload")]
+    distances = sorted({row["distance_m"] for row in sweep})
+    metrics, sizes = METRICS[:4], configs.PAYLOADS + configs.CAPABILITY_PAYLOADS
+    figure, axes = plt.subplots(len(metrics), len(distances), sharey="row", squeeze=False,
+                                figsize=(max(7, 4.5 * len(distances)), 11))
+    for column, distance in enumerate(distances):
+        for line, (title, unit, value, log, _) in enumerate(metrics):
+            axis = axes[line][column]
+            for tech in TECHS:
+                points = sorted((row["params"].get("payload", 32), value(row)) for row in sweep
+                                if row["tech"] == tech and row["distance_m"] == distance
+                                and _usable(value(row), log))
+                if points:
+                    axis.plot(*zip(*points), "o-", color=TECH_COLOR[tech], label=TECH_LABEL[tech])
+            # Shaded: the capability sizes, sent fragmented. Left of it is the comparison.
+            axis.axvspan(configs.PAYLOADS[-1] * 1.5, configs.CAPABILITY_PAYLOADS[-1] * 1.5,
+                         color=AXIS, alpha=0.2, zorder=0)
+            _scale(axis, "x", True)
+            _scale(axis, "y", log, percent=title == "Delivered")
+            axis.set_xticks(sizes, [str(size) for size in sizes])
+            axis.grid(True)
+            if line == 0:
+                axis.set_title(_distance_label(distance))
+            if column == 0:
+                axis.set_ylabel(f"{title}\n{unit}")
+        axes[-1][column].set_xlabel("payload (bytes)")
+    axes[0][0].legend(frameon=False, fontsize=8, loc="lower left")
+    _finish(figure, path, "Payload size on every radio. Shaded: fragmented, a library capability.")
 
 
 def plot_latency_cdf(rows, exchanges, path):

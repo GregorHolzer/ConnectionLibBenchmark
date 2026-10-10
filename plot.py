@@ -6,6 +6,7 @@
 Writes into figures/<campaign>/ (what each one is for is in bench/plots.py):
 
     technologies.png   the three technologies at their baseline, one panel per metric
+    payloads.png       the three technologies against payload size
     lora_factors.png   what each LoRa knob does
     latency_cdf.png    the whole latency distribution per technology
 """
@@ -31,6 +32,7 @@ def main():
     out_dir = REPO_ROOT / "figures" / args.campaign
     out_dir.mkdir(parents=True, exist_ok=True)
     plots.plot_technologies(rows, summary.standing_currents(runs), out_dir / "technologies.png")
+    plots.plot_payloads(rows, out_dir / "payloads.png")
     plots.plot_lora_factors(rows, out_dir / "lora_factors.png")
     plots.plot_latency_cdf(rows, exchanges, out_dir / "latency_cdf.png")
     print(summary.table(rows))

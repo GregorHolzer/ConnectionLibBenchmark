@@ -52,12 +52,34 @@ class Airtime(unittest.TestCase):
 
 
 class Configs(unittest.TestCase):
-    def test_site_is_one_point_per_24ghz_radio_and_the_lora_sweep(self):
+    def test_site_is_the_same_payload_sweep_on_every_radio_and_the_lora_knobs(self):
         site = configs.site_configs()
-        self.assertEqual([c.key for c in site[:3]],
+        self.assertEqual([c.key for c in site if c.name == "baseline"],
                          ["zigbee/baseline", "espnow/baseline", "lora/baseline"])
-        self.assertEqual(sum(c.tech == "lora" for c in site), 16)
+        self.assertEqual([sum(c.tech == t for c in site) for t in ("zigbee", "espnow", "lora")],
+                         [3, 6, 18])
+        self.assertEqual(sorted(c.payload for c in site if c.tech == "zigbee"), [8, 16, 32])
+        for tech in ("espnow", "lora"):
+            self.assertEqual(sorted(c.payload for c in site if c.tech == tech
+                                    and c.name.split("=")[0] in ("baseline", "payload")),
+                             configs.PAYLOADS + configs.CAPABILITY_PAYLOADS)
         self.assertEqual(len({c.key for c in site}), len(site))
+
+    def test_a_radio_fragments_only_above_its_own_packet_limit(self):
+        def packets(tech, payload):
+            return configs.packet_sizes(configs.Config(tech, "x", {"payload": payload}))
+        for tech in ("zigbee", "espnow", "lora"):
+            self.assertEqual(packets(tech, 84), [84])
+            limit = configs.NATIVE_LIMIT[tech]
+            self.assertEqual(packets(tech, limit), [limit])
+            self.assertEqual(len(packets(tech, limit + 1)), 2)
+            self.assertEqual(sum(packets(tech, 1000)) - 3 * len(packets(tech, 1000)), 1000)
+        self.assertEqual([len(packets(t, 250)) for t in ("zigbee", "espnow", "lora")], [4, 1, 2])
+        self.assertEqual(len(packets("zigbee", 1000)), 13)
+        site = configs.site_configs()
+        self.assertFalse(any(c.wrapped for c in site if c.payload in configs.PAYLOADS))
+        self.assertTrue(all(c.wrapped for c in site if c.payload in configs.CAPABILITY_PAYLOADS))
+        self.assertEqual([c.exchanges for c in configs.lora_configs() if c.wrapped], [5, 5])
 
     def test_reply_wait_and_lease_cover_the_slowest_point(self):
         slow = next(c for c in configs.lora_configs() if c.name == "sf=12")
@@ -70,14 +92,16 @@ class Configs(unittest.TestCase):
         for config in configs.site_configs():
             self.assertGreater(configs.lease_seconds(config), 0)
             self.assertEqual(configs.lease_seconds(config) % 4, 0)
+            self.assertLessEqual(configs.lease_seconds(config), 1020)
         self.assertEqual(configs.lease_seconds(configs.baseline_configs()[0]), 0)
         # An ESP-NOW run sends nothing on 433 MHz except its announcement.
         self.assertAlmostEqual(airtime.point_airtime_s(0, 0, 100, 1, True),
-                               airtime.time_on_air_ms(11, **airtime.HOME) / 1000)
+                               airtime.time_on_air_ms(airtime.SWITCH_FRAME_BYTES, **airtime.HOME) / 1000)
 
     def test_one_site_fits_in_an_hour_of_duty_cycle(self):
-        total = sum(airtime.point_airtime_s(configs.payload_airtime_ms(c), 200, c.exchanges, 1, True)
-                    for c in configs.lora_configs())
+        total = sum(airtime.point_airtime_s(configs.payload_airtime_ms(c),
+                                            configs.control_airtime_ms(c), c.exchanges, 1, True)
+                    for c in configs.site_configs())
         self.assertLess(total, airtime.DUTY_CYCLE_FRACTION * airtime.DUTY_CYCLE_WINDOW_S)
 
 
@@ -115,6 +139,18 @@ class Records(unittest.TestCase):
 
 
 class Summary(unittest.TestCase):
+    def test_only_a_24ghz_baseline_that_delivered_nothing_is_out_of_reach(self):
+        def run(tech, name, acked, error=None, sent=10):
+            return {"tech": tech, "name": name, "error": error,
+                    "summary": {"sent": sent, "acked": acked} if sent else None}
+        self.assertTrue(results.unreachable(run("zigbee", "baseline", 0)))
+        self.assertTrue(results.unreachable(run("espnow", "baseline", 0)))
+        self.assertFalse(results.unreachable(run("espnow", "baseline", 3)))
+        self.assertFalse(results.unreachable(run("lora", "baseline", 0)))          # LoRa always runs
+        self.assertFalse(results.unreachable(run("zigbee", "payload=512", 0)))     # not the baseline
+        self.assertFalse(results.unreachable(run("zigbee", "baseline", 0, "no link (code 0)", 0)))
+        self.assertFalse(results.unreachable(run("zigbee", "standing", 0, sent=0)))
+
     def test_round_trip_from_disk_to_metrics(self):
         run = records.parse(LORA_RUN)
         energy = {"run": {"duration_s": 3.0, "mean_ua": 90000.0, "energy_mj": 1350.0,
@@ -150,6 +186,31 @@ class Summary(unittest.TestCase):
         # 4 mA above standing for 3 s at 5 V = 60 mJ, over three delivered payloads.
         self.assertAlmostEqual(row["energy"]["excess_energy_per_delivered_mj"], 20.0)
         self.assertIn("lora/baseline", summary.table(rows))
+
+
+class Site(unittest.TestCase):
+    def test_a_dead_baseline_skips_its_radio_until_a_later_baseline_delivers(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "bench_cli", Path(__file__).resolve().parent.parent / "bench.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        ran = []
+
+        class Runner:
+            def run(self, config, distance, round_index):
+                ran.append((round_index, config.key))
+                acked = 0 if (config.tech, round_index) == ("zigbee", 0) else 5
+                return {"distance_m": distance, "tech": config.tech, "name": config.name,
+                        "error": None, "summary": {"sent": 10, "acked": acked}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = results.ResultWriter(Path(tmp))
+            cli.describe = lambda record: ""
+            plan = [(c, 22.0, r) for r in (0, 1) for c in configs.site_configs(("zigbee",))]
+            cli.run_all(Runner(), writer, plan)
+        self.assertEqual(ran, [(0, "zigbee/baseline"), (1, "zigbee/baseline"),
+                               (1, "zigbee/payload=8"), (1, "zigbee/payload=16")])
 
 
 if __name__ == "__main__":

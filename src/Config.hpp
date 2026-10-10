@@ -51,6 +51,7 @@ constexpr Tech kTech = Tech::BENCH_TECH;
 constexpr const char *kTechName = BENCH_STRINGIFY(BENCH_TECH);
 constexpr uint8_t kRunId = BENCH_RUN_ID;
 constexpr size_t kPayloadBytes = BENCH_PAYLOAD;
+constexpr size_t kMaxMessageBytes = 1024;   // FragmentingTransport's default limit
 constexpr uint32_t kExchanges = BENCH_EXCHANGES;
 constexpr uint32_t kIdleMs = BENCH_IDLE_MS;
 constexpr uint32_t kAckWaitMs = BENCH_ACK_WAIT_MS;
@@ -69,11 +70,17 @@ constexpr uint8_t kEspNowChannel = BENCH_ESPNOW_CHANNEL;
 constexpr uint8_t kPeerMac[6] = BENCH_PEER_MAC;      // the other board's WiFi MAC
 constexpr uint64_t kPeerXbee64 = BENCH_PEER_XBEE;    // the gateway's XBee, used by the node
 
+// Each radio's single-packet limit. A payload that fits goes through the bare backend; a larger
+// one through ConnectionLib's FragmentingTransport, on both boards. So a radio fragments only
+// where it has to.
+constexpr size_t kNativeLimitBytes = kTech == Tech::Zigbee ? 84 : kTech == Tech::LoRa ? 248 : 250;
+constexpr bool kFragmented = kPayloadBytes > kNativeLimitBytes;
+
 // The EU envelope (docs/regulations.md), checked by the compiler: a configuration outside it does
 // not build, so it can never be flashed, let alone recorded as measured.
 static_assert(kPayloadBytes >= 8, "payload must hold the 8-byte frame header");
-static_assert(kPayloadBytes <= (kTech == Tech::Zigbee ? 84 : kTech == Tech::LoRa ? 248 : 250),
-              "payload exceeds this radio's single-packet limit");
+static_assert(kPayloadBytes <= kMaxMessageBytes,
+              "payload exceeds the fragmenting wrapper's limit");
 static_assert(kPoint.txPowerDbm <= 7, "above 7 dBm conducted exceeds 10 mW e.r.p.");
 static_assert(kPoint.spreadingFactor >= 7 && kPoint.spreadingFactor <= 12, "SF must be 7..12");
 static_assert(kPoint.codingRate >= 5 && kPoint.codingRate <= 8, "coding rate must be 4/5..4/8");

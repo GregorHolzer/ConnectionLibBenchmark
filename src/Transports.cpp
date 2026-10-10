@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 
+#include <ConnectionLib/FragmentingTransport.hpp>
 #include <ConnectionLib/backends/espnow/EspNowTransport.hpp>
 #include <ConnectionLib/backends/lora/LoRaTransport.hpp>
 #include <ConnectionLib/backends/zigbee/ZigbeeTransport.hpp>
@@ -22,6 +23,23 @@ Address peerMac() {
     std::copy(kPeerMac, kPeerMac + 6, mac.begin());
     return Address::mac(mac);
 }
+
+FragmentingConfig fragmentingConfig() {
+    FragmentingConfig cfg;
+    cfg.maxMessageBytes = kMaxMessageBytes;
+    cfg.maxQueuedMessages = 0;   // a duty-cycle lock stays DutyCycleExceeded, never a silent queue
+    return cfg;
+}
+
+/** @brief FragmentingTransport only references its backend; this one also owns it. */
+class OwningFragmentingTransport : public FragmentingTransport {
+  public:
+    explicit OwningFragmentingTransport(std::unique_ptr<Transport> inner)
+        : FragmentingTransport(*inner, fragmentingConfig()), inner_(std::move(inner)) {}
+
+  private:
+    std::unique_ptr<Transport> inner_;
+};
 
 }   // namespace
 
@@ -54,14 +72,18 @@ std::unique_ptr<Transport> makeZigbee() {
 }
 
 std::unique_ptr<Transport> makeTransport(Tech tech, const LoRaParams &lora,
-                                         uint32_t loRaAckTimeoutMs) {
+                                         uint32_t loRaAckTimeoutMs, bool fragmented) {
+    std::unique_ptr<Transport> link;
     switch (tech) {
-        case Tech::EspNow: return makeEspNow();
-        case Tech::LoRa: return makeLoRa(lora, loRaAckTimeoutMs);
-        case Tech::Zigbee: return makeZigbee();
+        case Tech::EspNow: link = makeEspNow(); break;
+        case Tech::LoRa: link = makeLoRa(lora, loRaAckTimeoutMs); break;
+        case Tech::Zigbee: link = makeZigbee(); break;
         case Tech::None: break;
     }
-    return nullptr;
+    if (link && fragmented) {
+        link = std::make_unique<OwningFragmentingTransport>(std::move(link));
+    }
+    return link;
 }
 
 Address gatewayAddress(Tech tech) {

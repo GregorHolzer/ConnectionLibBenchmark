@@ -31,6 +31,7 @@ bool announce(std::unique_ptr<Transport> &link) {
     config[frames::kBwKHz] = kPoint.bandwidthKHz;
     config[frames::kLease4s] = static_cast<uint8_t>((kLeaseSeconds + 3) / 4);
     config[frames::kTechnology] = static_cast<uint8_t>(kTech);
+    config[frames::kFragmenting] = kFragmented ? 1 : 0;
 
     uint8_t probe[frames::kHeaderBytes];
     frames::build(probe, sizeof(probe), 'N', 0, kRunId);
@@ -45,7 +46,7 @@ bool announce(std::unique_ptr<Transport> &link) {
             board::loRaRail(false);   // or the SX1278 would keep receiving under the whole run
         }
         delay(kSwitchGuardMs);
-        link = makeTransport(kTech, kPoint, kAckWaitMs);
+        link = makeTransport(kTech, kPoint, kAckWaitMs, kFragmented);
         if (!link->setup()) {
             return false;
         }

@@ -22,7 +22,7 @@ DUTY_CYCLE_WINDOW_S = 3600.0
 
 # src/Config.hpp kHome and src/Frames.hpp: the config frame on home, and a header-only frame.
 HOME = {"sf": 12, "bw_khz": 125, "coding_rate": 8, "preamble": 8}
-SWITCH_FRAME_BYTES = 11
+SWITCH_FRAME_BYTES = 12
 CONTROL_FRAME_BYTES = 8
 CONTROL_ATTEMPTS = 3   # src/NodeControl.cpp kAttempts
 

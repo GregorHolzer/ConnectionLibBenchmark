@@ -56,6 +56,13 @@ class ResultWriter:
                 if r["complete"] and not r["error"]}
 
 
+def unreachable(run):
+    """A Zigbee or ESP-NOW baseline that ran and delivered nothing: that radio does not reach."""
+    summary = run["summary"]
+    return bool(run["tech"] != "lora" and run["name"] == "baseline" and not run["error"]
+                and summary and summary["sent"] and not summary["acked"])
+
+
 def load_runs(results_dir):
     path = Path(results_dir) / "runs.jsonl"
     if not path.exists():

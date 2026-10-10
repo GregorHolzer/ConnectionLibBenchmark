@@ -11,11 +11,54 @@ The node sends payloads to the gateway one way, back to back. The measured loop 
 - `send()` returns when the library has its confirmation of delivery, or has given up waiting:
   ESP-NOW's MAC ack, Zigbee's APS ack, ConnectionLib's software ack on LoRa.
 - Each payload is sent once. The benchmark adds no retries and no acknowledgement of its own.
+- Up to 84 B a payload is one packet through the bare backend, on every radio. 256 and 512 B
+  are several packets per `send()` ([below](#larger-payloads-a-library-capability)).
 - A run stops after 10 unacknowledged payloads in a row.
 - Results are kept in RAM and printed after the run, so the serial port is in neither the timings
   nor the energy.
 
 The PPK2 meters the node for the whole run.
+
+## Larger payloads: a library capability
+
+The payload sizes fall in two groups, and the results should be reported in two groups. Zigbee
+takes part only up to 32 B ([field-campaign.md](field-campaign.md#zigbee-and-full-size-frames)).
+
+**The comparison: 8, 16, 32, 84 B.** 84 B is Zigbee's single-packet limit (LoRa 248 B, ESP-NOW
+250 B), so this is the range common to all three. Every radio sends one bare packet, and the
+numbers compare the radios.
+
+**Library capability: 256, 512 B.** No radio carries these in one packet. ConnectionLib's
+`FragmentingTransport`, on both boards, cuts the payload into packets of the radio's own size
+with a 3-byte header (message id, index, count) each. These numbers show that, and at what
+cost, the library carries a payload a radio cannot; they are not a like-for-like comparison of
+the radios, which need different numbers of packets:
+
+| Payload | Zigbee (81 B per packet) | ESP-NOW (247 B) | LoRa (245 B) | LoRa airtime at the baseline |
+|---|---|---|---|---|
+| up to 84 B | 1, bare | 1, bare | 1, bare | 0.2–0.7 s |
+| 256 B | 4 | 2 | 2 | 1.9 s |
+| 512 B | 7 | 3 | 3 | 3.7 s |
+
+How to read a fragmented run:
+
+- **One row of `exchanges.csv` is still one payload**, not one packet. `latency_us` is the whole
+  `send()`: every packet and every ack.
+- **`acked` means every packet was acknowledged.** The wrapper retransmits nothing and stops at
+  the first packet that fails, so one lost packet loses the payload. With a per-packet loss of
+  p, a payload of n packets arrives with probability (1 − p)ⁿ: delivery falls with size even on
+  an unchanged link, fastest on Zigbee.
+- **`total_bytes`** is summed over the packets: payload + 3 per packet, + 7 per packet on LoRa.
+  A 256 B payload reports 268 on Zigbee, 262 on ESP-NOW and 276 on LoRa.
+- **`status`** is that of the last packet sent. A duty-cycle lock is reported as
+  `DutyCycleExceeded`; the wrapper's send queue is switched off.
+- **The gateway counts reassembled payloads**, so `gateway_pdr` is comparable with `pdr`.
+- **LoRa sends 5 payloads per fragmented run**, not 20, to fit the duty cycle. Its delivery
+  ratio there moves in steps of 20 %, and latency has no confidence interval below 6 samples.
+
+A radio fragments only above its own limit, so a size between 84 B and 248 B would be fragmented
+on Zigbee alone. `results/desk-20261009` used 250, 500 and 1000 B and still fragmented every
+radio above 84 B; its `espnow/payload=250` is two packets where today it would be one.
 
 ## Files
 
@@ -37,7 +80,7 @@ Everything of a campaign is in `results/<campaign>/`.
 | `distance_m`, `round`, `key` | | which run this payload belongs to; `key` is `<technology>/<configuration>` |
 | `seq` | | position in the run, from 0 |
 | `payload_bytes` | bytes | application payload handed to `send()` |
-| `total_bytes` | bytes | what the library reports it put on the air: payload plus the library's own framing (7 bytes on LoRa, 0 on ESP-NOW and Zigbee). Radio-level framing is not included. |
+| `total_bytes` | bytes | what the library reports it put on the air: payload plus the library's own framing (7 bytes on LoRa, 0 on ESP-NOW and Zigbee). Fragmented: summed over the packets, each with 3 bytes more. Radio-level framing is not included. |
 | `latency_us` | µs | time inside `send()`: from handing over the payload until the library had its ack or gave up |
 | `status`, `status_name` | | the library's `SendStatus`: `Ok`, `Timeout`, `Failed`, `DutyCycleExceeded`, … |
 | `acked` | 0/1 | whether the library reported the payload acknowledged. This is the delivery signal. |
@@ -48,7 +91,7 @@ Everything of a campaign is in `results/<campaign>/`.
 | Field | Meaning |
 |---|---|
 | `distance_m`, `round`, `key`, `tech`, `name` | where and what; `distance_m` is null for baseline holds |
-| `params` | the configuration: payload size, and for LoRa `sf`, `bw`, `cr`, `pwr`, `preamble` |
+| `params` | the configuration: payload size, and for LoRa `sf`, `bw`, `cr`, `pwr`, `preamble`. |
 | `exchanges_planned` | payloads the run was built to send; 0 for a baseline hold |
 | `started_at`, `run_id` | start time; the one-byte id the gateway sees |
 | `home.acked`, `home.attempts` | whether the gateway acknowledged the announcement on LoRa home, and on which attempt (1–3) |
@@ -62,7 +105,7 @@ Everything of a campaign is in `results/<campaign>/`.
 | `delivery.pdr`, `delivery.gateway_pdr` | `acked / sent` and `received / sent` |
 | `energy.run`, `energy.idle` | the two power windows, [below](#energy) |
 | `idle_ms` | length of the idle hold the node reports, for baseline runs |
-| `payload_airtime_ms` | calculated time-on-air of one data frame; 0 off LoRa |
+| `payload_airtime_ms` | calculated time-on-air of one payload, over all its packets; 0 off LoRa |
 | `duty_wait_s` | how long the script waited for airtime budget before this run |
 | `error`, `complete` | `ERR` text or `timeout`; whether the node reached `END` |
 
@@ -125,7 +168,8 @@ milliseconds at each edge. Runs are sized to last seconds for that reason.
   during a LoRa `send()` the radio driver keeps it busy. Part of the difference is the ESP32.
 - **Goodput is burst goodput.** On LoRa the 10 % duty cycle limits the sustained rate to about a
   tenth of it.
-- **Zigbee latency is mostly the serial link** between the ESP32 and the XBee at 9600 baud.
+- **Zigbee latency is mostly the serial link** between the ESP32 and the XBee at 9600 baud. It
+  grows with payload size for that reason, about a millisecond per byte.
 - **Energy is the sender's.** The gateway is not metered.
 - **The LoRa SNR reading tops out** around +14 dB; above that it says only "strong".
 

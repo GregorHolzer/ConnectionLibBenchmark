@@ -24,12 +24,14 @@ forest-sensor deployment.
 ./bench.py site --distance 100 --note "edge of the clearing, light rain"
 
 ./bench.py status                      # what has been recorded, as a table
-./plot.py --campaign field-<date>      # figures/<campaign>/: technologies, lora_factors, latency_cdf
+./plot.py --campaign field-<date>      # figures/<campaign>/: technologies, payloads, lora_factors, latency_cdf
 ```
 
-`site` runs Zigbee, ESP-NOW, then 16 LoRa settings: 18 flashes, about 6 s of build and 15 s of
-upload each. Interrupt it and run the same command again to resume. `--rounds 2` repeats the set
-in reverse order. All sites of one day land in `results/field-<date>/` unless `--campaign` says
+`site` measures 27 configurations: the payload sizes 8, 16, 32, 84, 256 and 512 B on ESP-NOW and
+LoRa, 8, 16 and 32 B on Zigbee, and LoRa's other knobs one at a time. Each is a flash, about 6 s of build and 15 s
+of upload; a whole site takes roughly 25 minutes and three quarters of an hour's 433 MHz duty
+cycle, so a second site inside the same hour waits. Interrupt it and run the same command again to resume.
+`--rounds 2` repeats the set in reverse order. All sites of one day land in `results/field-<date>/` unless `--campaign` says
 otherwise.
 
 Needs PlatformIO, `pyserial`, `matplotlib` and `ppk2-api`; run with the interpreter of a venv that
@@ -45,6 +47,11 @@ goes out at once. Time in `send()` is the delivery latency, `acknowledged` is th
 retries, no pause, and results are kept in RAM and printed after the run, so the serial port is in
 neither the timings nor the energy.
 
+The comparison of the three radios is the payloads up to 84 B, Zigbee's single-packet limit and
+so the largest size all three carry in one packet through the bare backend. 256 and 512 B are
+measured as a capability of the library: above its radio's limit a payload goes through
+ConnectionLib's `FragmentingTransport` and one `send()` becomes several packets.
+
 The gateway application answers no data frame. It counts what arrives and, when the node asks
 after its run, sends one report with that count and the mean RSSI/SNR. Details and every metric:
 [docs/metrics.md](docs/metrics.md). How the gateway follows LoRa settings, what a site costs in
@@ -59,9 +66,9 @@ duty cycle, and what limits the result: [docs/field-campaign.md](docs/field-camp
 | `src/gateway.cpp` | the receiver: WAIT on LoRa home, RUN on the one radio a config named |
 | `src/Frames.hpp` | the application frames: data, config, end, report |
 | `src/Config.hpp` | the configuration macros and the EU envelope as `static_assert`s |
-| `src/Transports.cpp` | the only file that names a ConnectionLib backend |
+| `src/Transports.cpp` | the only file that names a ConnectionLib backend, and where a payload too large for one packet gets its fragmenting wrapper |
 | `bench.py` | the command line |
-| `bench/configs.py` | which configurations exist |
+| `bench/configs.py` | which configurations exist, how many packets each payload becomes, and the gateway's lease |
 | `bench/firmware.py`, `bench/board.py` | write the config header and flash; reset and read the node |
 | `bench/runner.py` | one run: duty-cycle wait, flash, capture, PPK2 windows, record |
 | `bench/airtime.py` | LoRa time-on-air and the persisted duty-cycle ledger |

@@ -61,6 +61,9 @@ def parse_args():
                       help="repeat the set; even rounds run in reverse order")
     site.add_argument("--tech", action="append", choices=["zigbee", "espnow", "lora"],
                       help="limit to these technologies (repeatable)")
+    site.add_argument("--config", action="append", metavar="KEY",
+                      choices=[c.key for c in configs.site_configs()],
+                      help="limit to these configurations, e.g. zigbee/payload=512 (repeatable)")
     site.add_argument("--note", default="", help="free text: weather, obstacles, antenna height")
 
     commands.add_parser("status", help="print what the campaign holds")
@@ -126,25 +129,45 @@ def make_runner(args):
 
 
 def run_all(runner, writer, plan):
-    """Run every (config, distance, round) not yet recorded. Ctrl-C stops between runs cleanly."""
+    """Run every (config, distance, round) not yet recorded. Ctrl-C stops between runs cleanly.
+
+    Once a Zigbee or ESP-NOW baseline has delivered nothing at a distance, that radio's other
+    points there are skipped: each would only fail and cost its lease. The latest baseline
+    decides, and a baseline itself is never skipped, so a later round can test the radio again.
+    LoRa always runs."""
     done = writer.completed()
+    out_of_reach = set()
+
+    def note_reach(run):
+        if run["name"] == "baseline" and run["summary"] and not run["error"]:
+            key = (run["distance_m"], run["tech"])
+            out_of_reach.add(key) if results.unreachable(run) else out_of_reach.discard(key)
+
+    for recorded in results.load_runs(writer.dir):
+        note_reach(recorded)
     todo = [item for item in plan if (item[1], item[2], item[0].key) not in done]
     print(f"{len(todo)} to run, {len(plan) - len(todo)} already recorded")
     for index, (config, distance, round_index) in enumerate(todo, 1):
         print(f"[{index}/{len(todo)}] {config.key}", flush=True)
+        if config.name != "baseline" and (distance, config.tech) in out_of_reach:
+            print("  skipped: this radio's baseline delivered nothing at this distance", flush=True)
+            continue
         try:
             record = runner.run(config, distance, round_index)
         except firmware.FirmwareError as exc:
             sys.exit(str(exc))
         print(f"  {describe(record)}", flush=True)
+        note_reach(record)
 
 
 def site_plan(args):
-    """Zigbee, ESP-NOW, the LoRa baseline, then the other LoRa points in an order shuffled per
-    distance, so no setting always runs last. Even rounds reverse the whole order, which puts any
-    drift during the visit on both sides of every configuration."""
+    """The three baselines (Zigbee, ESP-NOW, LoRa), then every swept point in an order shuffled
+    per distance, so no setting always runs last. Even rounds reverse the whole order, which puts
+    any drift during the visit on both sides of every configuration."""
     order = configs.site_configs(args.tech or ("zigbee", "espnow", "lora"))
-    fixed = [c for c in order if c.tech != "lora" or c.name == "baseline"]
+    if args.config:
+        order = [c for c in order if c.key in args.config]
+    fixed = [c for c in order if c.name == "baseline"]
     swept = [c for c in order if c not in fixed]
     random.Random(f"{args.campaign}/{args.distance}").shuffle(swept)
     plan = []

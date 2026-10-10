@@ -10,7 +10,8 @@
  *
  *   'D' data      node -> gateway, padded to the configured payload size. The measured traffic.
  *   'C' config    node -> gateway on LoRa home, before every run: which radio the run uses, its
- *                 LoRa parameters, and how long the gateway may stay there. See ConfigField.
+ *                 LoRa parameters, whether it is wrapped in a FragmentingTransport, and how long
+ *                 the gateway may stay there. See ConfigField.
  *   'N' probe     node -> gateway on the run's radio, header only: "did you switch?" Answered
  *                 by the library's ack alone.
  *   'E' end       node -> gateway after the run: send your report and go back to home.
@@ -30,12 +31,12 @@
 namespace bench::frames {
 
 constexpr size_t kHeaderBytes = 8;     // also the smallest frame
-constexpr size_t kMaxBytes = 250;      // ESP-NOW's limit, the largest of the three
-constexpr size_t kConfigBytes = 11;
+constexpr size_t kConfigBytes = 12;
 constexpr uint8_t kNoReading = 0;      // RSSI byte of a radio that reports none
 
 enum ConfigField : size_t {
-    kSf = 4, kCr = 5, kPower = 6, kPreamble = 7, kBwKHz = 8, kLease4s = 9, kTechnology = 10
+    kSf = 4, kCr = 5, kPower = 6, kPreamble = 7, kBwKHz = 8, kLease4s = 9, kTechnology = 10,
+    kFragmenting = 11   // nonzero: the run's radio is wrapped in a FragmentingTransport
 };
 
 inline void build(uint8_t *buf, size_t len, char kind, uint16_t seq, uint8_t runId) {

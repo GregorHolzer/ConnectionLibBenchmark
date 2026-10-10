@@ -42,7 +42,8 @@ class Runner:
         """An upper bound on the run, so a hung board ends the point and not the day."""
         wait_s = configs.ack_wait_ms(config) / 1000.0
         bound = BOOT_ALLOWANCE_S + config.idle_ms / 1000.0
-        bound += config.exchanges * (0.1 + SEND_TIMEOUT_S + wait_s)
+        packets = len(configs.packet_sizes(config))
+        bound += config.exchanges * packets * (0.1 + SEND_TIMEOUT_S + wait_s)
         if config.exchanges:
             bound += airtime.CONTROL_ATTEMPTS * (10 + 2 * wait_s)   # announcement and report
         return bound
